@@ -23,7 +23,8 @@ Control radiod channels for any application: AM/FM/SSB radio, WSPR monitoring, S
 
 ## Features
 
-- **Complete radiod API** — all 110+ TLV status/command parameters exposed, generated from ka9q-radio's C headers
+- **Complete radiod API** — all 117 TLV status/command parameters exposed, generated from ka9q-radio's C headers
+- **Every radiod RTP encoding decoded** — `S16LE/BE`, `F32LE/BE`, `F16LE/BE`, `MULAW`, `ALAW` via pure-NumPy `parse_rtp_samples()`; `OPUS` / `OPUS_VOIP` via the optional `OpusDecoder` (install with `[opus]` extra)
 - **Four stream abstractions** — `RTPRecorder` (raw packets), `RadiodStream` (samples + gap handling), `ManagedStream` (self-healing single channel), `MultiStream` (shared socket, many SSRCs)
 - **Typed status decoder** — `ChannelStatus`, `FrontendStatus`, `PllStatus`, etc. with dotted-path field access
 - **Precise RTP timing** — GPS_TIME / RTP_TIMESNAP for sample-accurate wallclock timestamps
@@ -37,6 +38,19 @@ Control radiod channels for any application: AM/FM/SSB radio, WSPR monitoring, S
 
 ```bash
 pip install ka9q-python
+```
+
+Optional extras:
+
+| Extra | Adds | Needed for |
+|-------|------|------------|
+| `tui` | `textual` | `ka9q tui` interactive terminal UI |
+| `opus` | `opuslib` | decoding `OPUS` / `OPUS_VOIP` RTP payloads via `OpusDecoder` |
+| `dev`  | `pytest`, `pytest-cov` | running the test suite |
+
+```bash
+pip install "ka9q-python[opus]"          # one extra
+pip install "ka9q-python[tui,opus]"      # multiple
 ```
 
 Or install from source:

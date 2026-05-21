@@ -150,7 +150,7 @@ Tuning & filter:
 
 Gain / AGC:
 - `set_gain(ssrc, gain_db)`
-- `set_agc(ssrc, enable, hangtime=None, recovery_rate=None, threshold=None)`
+- `set_agc(ssrc, enable, hangtime=None, headroom=None, recovery_rate=None, threshold=None)`
 - `set_agc_hangtime(ssrc, seconds)`
 - `set_agc_recovery_rate(ssrc, db_per_sec)`
 - `set_agc_threshold(ssrc, threshold_db)`
@@ -286,20 +286,20 @@ for the full list — they mirror ka9q-radio's `status.h`.
 
 RTP output encoding (integer values match ka9q-radio's `rtp.h`):
 
-| Name | Value | Notes |
-|---|---|---|
-| `NO_ENCODING` | 0 | radiod default |
-| `S16LE` | 1 | Signed 16-bit little-endian PCM |
-| `S16BE` | 2 | Signed 16-bit big-endian PCM |
-| `OPUS` | 3 | Opus audio |
-| `F32LE` | 4 | 32-bit float LE (also `Encoding.F32`) |
-| `AX25` | 5 | Packet radio |
-| `F16LE` | 6 | 16-bit float LE (also `Encoding.F16`) |
-| `OPUS_VOIP` | 7 | Opus with `APPLICATION_VOIP` |
-| `F32BE` | 8 | 32-bit float BE |
-| `F16BE` | 9 | 16-bit float BE |
-| `MULAW` | 10 | μ-law |
-| `ALAW` | 11 | A-law |
+| Name | Value | Decoded by | Notes |
+|---|---|---|---|
+| `NO_ENCODING` | 0 | `parse_rtp_samples` | radiod default → treated as F32LE |
+| `S16LE` | 1 | `parse_rtp_samples` | Signed 16-bit little-endian PCM |
+| `S16BE` | 2 | `parse_rtp_samples` | Signed 16-bit big-endian PCM |
+| `OPUS` | 3 | `OpusDecoder` (extra) | Opus audio — needs `[opus]` install extra |
+| `F32LE` | 4 | `parse_rtp_samples` | 32-bit float LE (also `Encoding.F32`) |
+| `AX25` | 5 | (caller handles bytes) | Packet radio — framed protocol, not samples |
+| `F16LE` | 6 | `parse_rtp_samples` | 16-bit float LE (also `Encoding.F16`) |
+| `OPUS_VOIP` | 7 | `OpusDecoder` (extra) | Opus with `APPLICATION_VOIP` |
+| `F32BE` | 8 | `parse_rtp_samples` | 32-bit float BE |
+| `F16BE` | 9 | `parse_rtp_samples` | 16-bit float BE |
+| `MULAW` | 10 | `parse_rtp_samples` | G.711 µ-law (table-based, pure NumPy) |
+| `ALAW` | 11 | `parse_rtp_samples` | G.711 A-law (table-based, pure NumPy) |
 
 ### `DemodType`
 
@@ -416,6 +416,57 @@ Derived properties:
 ---
 
 ## Streams
+
+### `parse_rtp_samples()`
+
+Source: [stream.py](../ka9q/stream.py). Decodes one RTP payload to a
+NumPy sample array. Shared by `RadiodStream` and `MultiStream`.
+
+```python
+parse_rtp_samples(
+    payload: bytes,
+    encoding: int,        # any Encoding.* value
+    is_iq: bool,          # True → complex64 output; False → float32
+) -> np.ndarray | None
+```
+
+Covers every linear-PCM encoding radiod's `pt_from_info()` can grant:
+`NO_ENCODING`, `S16LE`, `S16BE`, `F32LE`, `F32BE`, `F16LE`, `F16BE`,
+`MULAW`, `ALAW`. G.711 µ-law / A-law use table-based NumPy decoders
+(no `audioop` dependency — that module is removed in Python 3.13).
+Unsupported encodings log a warning and fall back to F32LE.
+
+Returns `None` for `OPUS`, `OPUS_VOIP` (use `OpusDecoder` below), and
+`AX25` (framed protocol data, handle the bytes yourself).
+
+### `OpusDecoder`
+
+Source: [stream.py](../ka9q/stream.py). Optional Opus payload decoder
+for radiod's `OPUS` / `OPUS_VOIP` streams. Requires the `[opus]`
+install extra (`pip install ka9q-python[opus]`, which pulls
+`opuslib`).
+
+```python
+OpusDecoder(sample_rate: int = 48000, channels: int = 1)
+```
+
+- `decode(payload: bytes, *, fec: bool = False) -> np.ndarray` —
+  one Opus frame → float32 PCM, normalised to ±1.0. Stereo output is
+  interleaved L,R,L,R,…. Empty payload triggers one frame of
+  packet-loss concealment.
+- `sample_rate` / `channels` properties expose the codec config.
+
+Maintain one `OpusDecoder` instance per stream SSRC so the internal
+codec state — and therefore PLC — works correctly across packets.
+`sample_rate` must be one of 8000/12000/16000/24000/48000.
+
+```python
+from ka9q.stream import OpusDecoder
+
+dec = OpusDecoder(sample_rate=48000, channels=1)
+for payload in opus_payloads:
+    samples = dec.decode(payload)  # float32, mono
+```
 
 ### `RadiodStream`
 

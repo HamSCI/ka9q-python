@@ -41,6 +41,18 @@ pip install -e ".[dev]"
 
 This includes pytest and other testing tools.
 
+### Optional Extras
+
+`ka9q-python` defines three optional dependency groups:
+
+| Extra | Adds | Needed for |
+|-------|------|------------|
+| `dev` | `pytest`, `pytest-cov` | running the test suite |
+| `tui` | `textual` | the `ka9q tui` interactive terminal UI |
+| `opus` | `opuslib` | decoding `OPUS` / `OPUS_VOIP` RTP payloads with `ka9q.stream.OpusDecoder` |
+
+Combine as needed, e.g. `pip install -e ".[dev,opus]"`.
+
 ## For Use in Other Applications
 
 ### In requirements.txt
@@ -98,7 +110,7 @@ python3 -c "import ka9q; print(f'ka9q version {ka9q.__version__} installed succe
 
 Expected output (version will match whatever is installed):
 ```
-ka9q version 3.9.0 installed successfully
+ka9q version 3.15.0 installed successfully
 ```
 
 After installation, the `ka9q` command-line tool is also on your `PATH`:
@@ -131,7 +143,8 @@ Package works with Python's built-in networking. Use IP addresses instead of `.l
 - `numpy >= 1.24.0`
 
 ### Optional (for enhanced functionality)
-- `textual` — required for `ka9q tui`. Not pulled in by the base install; install with `pip install textual` (or bundle it into your deployment requirements).
+- `textual` — required for `ka9q tui`. Install via the `[tui]` extra or `pip install textual` directly.
+- `opuslib` — required to decode `OPUS` / `OPUS_VOIP` RTP payloads via `ka9q.stream.OpusDecoder`. Install via the `[opus]` extra or `pip install opuslib`. (Linear-PCM encodings — `S16LE/BE`, `F32LE/BE`, `F16LE/BE`, `MULAW`, `ALAW` — are decoded in pure NumPy and need no extra dependency.)
 - `avahi-utils` (Linux) — faster mDNS hostname resolution
 - `control` from ka9q-radio — fallback path for channel discovery
 
@@ -187,11 +200,13 @@ pip uninstall ka9q
 ```bash
 pip install build
 python3 -m build
+# or, with uv:
+uv build
 ```
 
-This creates:
-- `dist/ka9q-1.0.0-py3-none-any.whl` (wheel)
-- `dist/ka9q-1.0.0.tar.gz` (source distribution)
+This creates (filenames track the current version in `pyproject.toml`):
+- `dist/ka9q_python-X.Y.Z-py3-none-any.whl` (wheel)
+- `dist/ka9q_python-X.Y.Z.tar.gz` (source distribution)
 
 ### Upload to PyPI (maintainers only)
 ```bash

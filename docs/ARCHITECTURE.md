@@ -77,6 +77,17 @@ to handle out-of-order RTP. Hands each batch to an
 `on_samples(samples, quality)` callback. Does **not** heal radiod
 restarts — a restart produces a lasting silence.
 
+`stream.py` also exposes two payload-decoder helpers shared by every
+stream class:
+
+- `parse_rtp_samples(payload, encoding, is_iq)` — decodes every
+  linear-PCM encoding radiod emits (`S16LE/BE`, `F32LE/BE`,
+  `F16LE/BE`, `MULAW`, `ALAW`) to NumPy in pure Python, no
+  `audioop` (gone in Py 3.13).
+- `OpusDecoder(sample_rate, channels)` — decodes `OPUS` / `OPUS_VOIP`
+  via the optional `opuslib` dependency (`pip install ka9q-python[opus]`).
+  One instance per SSRC so codec state and PLC stay coherent.
+
 ### 3. `ManagedStream` ([managed_stream.py](../ka9q/managed_stream.py))
 
 High-level self-healing wrapper around `RadiodStream`. A background

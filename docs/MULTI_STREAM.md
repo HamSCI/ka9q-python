@@ -254,10 +254,16 @@ Based on the current source ([`ka9q/multi_stream.py`](../ka9q/multi_stream.py)):
 - **No `remove_channel()` in the public API.** To remove a channel,
   stop the `MultiStream`, rebuild it with the remaining channels, and
   start again. For long-lived recorders this has been acceptable.
-- **Opus encoded streams** — `parse_rtp_samples()` must understand
-  the encoding. S16LE/S16BE (1/2) and F32LE (4) are the well-tested
-  paths; if you need Opus, verify against
-  [`ka9q/stream.py`](../ka9q/stream.py).
+- **Linear-PCM encodings** are decoded by `parse_rtp_samples()` in
+  pure NumPy: `S16LE/BE`, `F32LE/BE`, `F16LE/BE`, `MULAW`, `ALAW`.
+  All radiod-emitted sample encodings work out of the box.
+- **Opus** (`OPUS`, `OPUS_VOIP`) is a framed codec, not raw samples
+  — `parse_rtp_samples()` returns `None` for those payloads. Wrap
+  the stream with `ka9q.stream.OpusDecoder` (requires the `[opus]`
+  install extra) to recover float32 PCM, keeping one decoder
+  instance per SSRC so packet-loss concealment works.
+- **AX25** (encoding 5) is framed protocol data, also not samples —
+  `parse_rtp_samples()` returns `None`. Handle the bytes yourself.
 - **`samples_per_packet=320` default** assumes the typical 12 kHz /
   26.67 ms RTP packetization used by radiod. If your channels run
   at a different packet cadence, set it explicitly.
