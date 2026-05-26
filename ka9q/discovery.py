@@ -540,16 +540,31 @@ def _decode_escape_sequences(s: str) -> str:
 
 def discover_radiod_services(timeout: float = 10.0):
     """
-    Discover all radiod services on the network via mDNS
-    
+    Discover all radiod services on the network via mDNS.
+
     Args:
         timeout: Maximum time to wait for avahi-browse (default 10 seconds)
-    
+
     Returns:
-        List of dicts with "name" and "address" keys
+        List of dicts with these keys:
+
+          "name"      operator-friendly service description (avahi-browse
+                      service name, e.g. "AC0G @EM38ww B1 T3FD")
+          "hostname"  mDNS control/status multicast hostname, e.g.
+                      "bee1-status.local" — the canonical radiod
+                      identifier per sigmond's RADIOD-IDENTIFICATION.md.
+          "address"   resolved multicast IPv4 address, e.g.
+                      "239.205.73.40".  Useful for connection but not
+                      stable across radiod restarts; clients should
+                      configure with `hostname` instead.
+          "port"      multicast port (typically 5006).
+
+    The `hostname` and `port` fields were added 2026-05-26 to
+    support sigmond's `[[radiod]] status` schema.  Pre-fix callers
+    that read `name` + `address` continue to work unchanged.
     """
     import subprocess
-    
+
     # Use dict to automatically deduplicate by address
     services_dict = {}
     try:
@@ -559,18 +574,34 @@ def discover_radiod_services(timeout: float = 10.0):
             text=True,
             timeout=timeout
         )
-        
+
+        # avahi-browse -p emits semicolon-delimited records.  Resolved
+        # service lines (prefixed "=") have the shape:
+        #   =;iface;proto;name;type;domain;hostname;address;port;txt...
+        # The mDNS hostname at parts[6] is the canonical multicast
+        # control/status name; parts[7] is the multicast IP (less
+        # stable, but unique enough for dedup).
         for line in result.stdout.split("\n"):
             if line.startswith("="):
                 parts = line.split(";")
-                if len(parts) >= 8:
+                if len(parts) >= 9:
                     name = _decode_escape_sequences(parts[3])
+                    hostname = parts[6]
                     address = parts[7]
+                    try:
+                        port = int(parts[8])
+                    except (ValueError, IndexError):
+                        port = 5006
                     # Use address as key to deduplicate
-                    services_dict[address] = {"name": name, "address": address}
+                    services_dict[address] = {
+                        "name": name,
+                        "hostname": hostname,
+                        "address": address,
+                        "port": port,
+                    }
     except Exception as e:
         logger.warning(f"Failed to discover radiod services: {e}")
-    
+
     # Convert dict back to list, sorted by name for consistency
     services = sorted(services_dict.values(), key=lambda x: x['name'])
     return services
