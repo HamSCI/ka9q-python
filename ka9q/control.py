@@ -1518,6 +1518,15 @@ class RadiodControl:
         encode_eol(cmd)
 
         sock = _create_status_listener_socket(multicast_addr, None)
+        # A status group with many channels (and many concurrent pollers
+        # during a provisioning burst) can overrun the default ~208 KB socket
+        # buffer and drop the one reply we are waiting for, forcing a spurious
+        # timeout.  Give the listener generous headroom (honored up to
+        # net.core.rmem_max; silently capped otherwise).
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+        except OSError:
+            pass
         try:
             deadline = time.time() + timeout
             next_poll = 0.0
