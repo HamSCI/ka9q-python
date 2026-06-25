@@ -56,7 +56,7 @@ pip install "ka9q-python[tui,opus]"      # multiple
 Or install from source:
 
 ```bash
-git clone https://github.com/mijahauan/ka9q-python.git
+git clone https://github.com/HamSCI/ka9q-python.git
 cd ka9q-python
 pip install -e .
 ```

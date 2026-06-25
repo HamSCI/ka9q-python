@@ -41,7 +41,7 @@ Production users:
 [psk-recorder](https://github.com/mijahauan/psk-recorder) runs 20
 channels (10 FT4 + 10 FT8) on bee3 through a single `MultiStream`.
 [wspr-recorder](https://github.com/mijahauan/wspr-recorder) and
-[hf-timestd](https://github.com/mijahauan/hf-timestd) use the same
+[hf-timestd](https://github.com/HamSCI/hf-timestd) use the same
 pattern.
 
 ---

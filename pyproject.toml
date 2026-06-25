@@ -45,10 +45,10 @@ opus = [
 ka9q = "ka9q.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mijahauan/ka9q-python"
-Documentation = "https://github.com/mijahauan/ka9q-python/blob/main/README.md"
-Repository = "https://github.com/mijahauan/ka9q-python"
-Issues = "https://github.com/mijahauan/ka9q-python/issues"
+Homepage = "https://github.com/HamSCI/ka9q-python"
+Documentation = "https://github.com/HamSCI/ka9q-python/blob/main/README.md"
+Repository = "https://github.com/HamSCI/ka9q-python"
+Issues = "https://github.com/HamSCI/ka9q-python/issues"
 
 [tool.setuptools]
 packages = ["ka9q"]

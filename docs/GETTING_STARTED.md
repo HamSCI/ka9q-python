@@ -25,7 +25,7 @@ pip install ka9q-python
 Or, if you want to install from source:
 
 ```bash
-git clone https://github.com/mijahauan/ka9q-python.git
+git clone https://github.com/HamSCI/ka9q-python.git
 cd ka9q-python
 pip install -e .
 ```
@@ -235,7 +235,7 @@ Congratulations! You've created your first `ka9q-python` application and learned
 
 3. **Learn About Advanced Features**: Check out `examples/advanced_features_demo.py` to see how to use Doppler tracking, PLL configuration, squelch, and more.
 
-4. **Join the Community**: If you have questions or want to contribute, visit the [GitHub repository](https://github.com/mijahauan/ka9q-python).
+4. **Join the Community**: If you have questions or want to contribute, visit the [GitHub repository](https://github.com/HamSCI/ka9q-python).
 
 ---
 

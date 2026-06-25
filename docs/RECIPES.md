@@ -132,7 +132,7 @@ matters.
 This is the pattern used by
 [wspr-recorder](https://github.com/mijahauan/wspr-recorder),
 [psk-recorder](https://github.com/mijahauan/psk-recorder), and
-[hf-timestd](https://github.com/mijahauan/hf-timestd):
+[hf-timestd](https://github.com/HamSCI/hf-timestd):
 
 1. Read a band plan (list of frequencies + preset + sample rate).
 2. For each entry, call `ensure_channel()` — deterministic SSRC

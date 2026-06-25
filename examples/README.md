@@ -288,7 +288,7 @@ The `diagnostics/` subdirectory contains utilities for troubleshooting and testi
 
 - **Getting Started Guide**: [docs/GETTING_STARTED.md](../docs/GETTING_STARTED.md)
 - **API Reference**: [docs/API_REFERENCE.md](../docs/API_REFERENCE.md)
-- **GitHub Issues**: [https://github.com/mijahauan/ka9q-python/issues](https://github.com/mijahauan/ka9q-python/issues)
+- **GitHub Issues**: [https://github.com/HamSCI/ka9q-python/issues](https://github.com/HamSCI/ka9q-python/issues)
 
 ---
 

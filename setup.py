@@ -18,7 +18,7 @@ setup(
     long_description_content_type='text/markdown',
     author='Michael Hauan AC0G',
     author_email='ac0g@hauan.org',
-    url='https://github.com/mijahauan/ka9q-python',
+    url='https://github.com/HamSCI/ka9q-python',
     packages=find_packages(),
     python_requires='>=3.9',
     install_requires=[
