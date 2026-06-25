@@ -130,8 +130,8 @@ matters.
 ## Recipe 2 — Fixed sets of same-type channels (WSPR, PSK, FT8, timing)
 
 This is the pattern used by
-[wspr-recorder](https://github.com/mijahauan/wspr-recorder),
-[psk-recorder](https://github.com/mijahauan/psk-recorder), and
+[wspr-recorder](https://github.com/HamSCI/wspr-recorder),
+[psk-recorder](https://github.com/HamSCI/psk-recorder), and
 [hf-timestd](https://github.com/HamSCI/hf-timestd):
 
 1. Read a band plan (list of frequencies + preset + sample rate).

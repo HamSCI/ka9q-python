@@ -38,9 +38,9 @@ Keep `ManagedStream` when:
 - You specifically want each channel's receive path isolated.
 
 Production users:
-[psk-recorder](https://github.com/mijahauan/psk-recorder) runs 20
+[psk-recorder](https://github.com/HamSCI/psk-recorder) runs 20
 channels (10 FT4 + 10 FT8) on bee3 through a single `MultiStream`.
-[wspr-recorder](https://github.com/mijahauan/wspr-recorder) and
+[wspr-recorder](https://github.com/HamSCI/wspr-recorder) and
 [hf-timestd](https://github.com/HamSCI/hf-timestd) use the same
 pattern.
 
