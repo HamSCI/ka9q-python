@@ -357,13 +357,13 @@ class RadiodStream:
         """Create and configure multicast receive socket."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # Allow address reuse
+        # Allow address reuse so multiple processes can each receive the
+        # same multicast group.  Deliberately NOT SO_REUSEPORT: with a
+        # group-address bind, REUSEPORT makes the kernel load-balance
+        # datagrams across the reuseport set, silently starving this
+        # socket of most of its own packets.  SO_REUSEADDR alone permits
+        # multiple multicast listeners without that load-balancing.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(socket, 'SO_REUSEPORT'):
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass  # Not supported on all platforms
 
         # Large receive buffer — matches MultiStream (commit 3a6cf26).
         # Single-channel sockets see less aggregate throughput than
@@ -378,20 +378,60 @@ class RadiodStream:
         except OSError:
             pass
 
-        # Bind to port
-        sock.bind(('0.0.0.0', self.channel.port))
+        # Bind to the channel's multicast GROUP address, NOT 0.0.0.0.
+        # This is the per-client segmentation mechanism: radiod publishes
+        # each channel to its own multicast group, and binding the socket
+        # to that group makes the kernel deliver ONLY that group's packets.
+        # A 0.0.0.0:port bind instead receives every multicast group the
+        # host has joined on this RTP port — i.e. every other client's
+        # channels too (tens of thousands of pps on a busy host) — which
+        # this socket would then have to filter in Python, dropping its
+        # own packets under the load.  Fall back to 0.0.0.0 only if the
+        # group bind is rejected (non-Linux multicast-bind semantics).
+        group_bound = True
+        try:
+            sock.bind((self.channel.multicast_address, self.channel.port))
+        except OSError:
+            sock.bind(('0.0.0.0', self.channel.port))
+            group_bound = False
 
-        # Join the multicast group on EVERY local IPv4 interface (lo,
-        # ens0, etc.) — not via INADDR_ANY, which leaves the choice to
-        # the kernel's routing table and silently misses radiod outputs
-        # that arrive on a non-default interface.  Most notably, a
-        # co-located radiod with TTL=0 emits only on `lo`; an
-        # INADDR_ANY join typically resolves to `ens0` and never sees
-        # those packets.  Same helper used by MultiStream (the shared-
-        # socket abstraction) so both classes have identical behaviour.
-        joined = join_multicast_all_interfaces(
-            sock, self.channel.multicast_address,
-        )
+        if group_bound:
+            # Group-address bind: the kernel already filters to this group,
+            # so a single INADDR_ANY membership is the correct companion
+            # (the kernel delivers the group on whatever interface it
+            # arrives).  A per-interface "join every interface" membership
+            # instead breaks delivery when combined with a group bind, so
+            # it is only used on the 0.0.0.0 fallback path below.  We also
+            # join loopback explicitly for a co-located TTL=0 radiod that
+            # emits only on `lo`.
+            joined: list[str] = []
+            group = socket.inet_aton(self.channel.multicast_address)
+            try:
+                sock.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                    struct.pack("=4sl", group, socket.INADDR_ANY),
+                )
+                joined.append("*")
+            except OSError as exc:
+                logger.debug("INADDR_ANY join failed for %s: %s",
+                             self.channel.multicast_address, exc)
+            try:
+                sock.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                    struct.pack("=4s4s", group, socket.inet_aton("127.0.0.1")),
+                )
+                joined.append("lo")
+            except OSError:
+                pass  # loopback membership is best-effort
+        else:
+            # 0.0.0.0 fallback: join on every local IPv4 interface, the
+            # legacy behaviour that catches a radiod whose output arrives
+            # on a non-default interface (including a TTL=0 loopback-only
+            # co-located radiod).
+            joined = join_multicast_all_interfaces(
+                sock, self.channel.multicast_address,
+            )
+
         if not joined:
             logger.warning(
                 "RadiodStream: no interface accepted the multicast "
@@ -400,9 +440,10 @@ class RadiodStream:
             )
         else:
             logger.debug(
-                "RadiodStream: joined %s:%d on interfaces: %s",
-                self.channel.multicast_address, self.channel.port,
-                ", ".join(joined),
+                "RadiodStream: bound %s (%s):%d joined via: %s",
+                self.channel.multicast_address,
+                "group" if group_bound else "0.0.0.0",
+                self.channel.port, ", ".join(joined),
             )
 
         # Timeout for periodic running check
@@ -480,16 +521,28 @@ class RadiodStream:
     
     def _process_packet(self, data: bytes):
         """Process a received RTP packet."""
-        # Parse RTP header
+        # Fast SSRC peek BEFORE the full RTP parse.  radiod commonly
+        # publishes many channels onto one shared data multicast group,
+        # so this single socket sees every channel's packets — tens of
+        # thousands per second on a busy host.  Fully parsing each one
+        # only to discard a foreign SSRC starves the receive loop and the
+        # kernel drops our *own* packets (manifesting downstream as a
+        # resequencer that never advances).  The cheap 4-byte SSRC peek
+        # lets us skip foreign packets at a fraction of the cost — the
+        # same strategy MultiStream uses for the identical situation.
+        if len(data) < 12:
+            return
+        if struct.unpack_from("!I", data, 8)[0] != self.channel.ssrc:
+            return  # Foreign SSRC on the shared group — skip cheaply.
+
+        # Parse RTP header (only our own packets reach here now)
         header = parse_rtp_header(data)
         if header is None:
             logger.debug("Invalid RTP packet")
             return
-        
-        # Filter by SSRC
-        if header.ssrc != self.channel.ssrc:
-            return  # Wrong stream
-        
+
+        # SSRC already verified by the fast peek above.
+
         # Update RTP stats
         self.quality.rtp_packets_received += 1
         
