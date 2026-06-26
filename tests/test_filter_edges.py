@@ -15,7 +15,7 @@ inspect the mock call kwargs.
 
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -129,30 +129,27 @@ class TestEnsureChannelFilterEdges:
     """ensure_channel plumbs filter args through to create_channel
     (create path) and to set_filter (reuse path)."""
 
-    @patch("ka9q.discovery.discover_channels")
-    def test_create_path_forwards_to_create_channel(self, mock_discover):
+    def test_create_path_forwards_to_create_channel(self):
         # No existing channel → ensure_channel goes through create.
-        # We bypass the verification poll loop by making the second
-        # discover_channels return a channel matching the request.
+        # poll_channel is called twice: the existence probe (None → force
+        # create) and the post-create verify (return a matching channel so
+        # ensure_channel doesn't raise TimeoutError).
         from ka9q.discovery import ChannelInfo
         control = _bare_control()
         control.create_channel = MagicMock(return_value=None)
 
-        ssrc = None  # capture
         ch_info = ChannelInfo(
             ssrc=0, preset="iq", sample_rate=16000, frequency=45.375e6,
             snr=0.0, multicast_address="239.1.2.3", port=5004,
         )
 
-        def discover_side_effect(*args, **kwargs):
-            # First call (existing-channel check): empty, force create.
-            # Subsequent calls (verification poll): return the channel.
-            if mock_discover.call_count == 1:
-                return {}
-            ch_info.ssrc = control.create_channel.call_args.kwargs["ssrc"]
-            return {ch_info.ssrc: ch_info}
+        def poll_side_effect(ssrc, *args, **kwargs):
+            if control.poll_channel.call_count == 1:
+                return None
+            ch_info.ssrc = ssrc
+            return ch_info
 
-        mock_discover.side_effect = discover_side_effect
+        control.poll_channel = MagicMock(side_effect=poll_side_effect)
 
         control.ensure_channel(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,
@@ -164,8 +161,7 @@ class TestEnsureChannelFilterEdges:
         assert kwargs["high_edge"] == +500.0
         assert kwargs["kaiser_beta"] == 11.0
 
-    @patch("ka9q.discovery.discover_channels")
-    def test_reuse_path_calls_set_filter(self, mock_discover):
+    def test_reuse_path_calls_set_filter(self):
         """When a matching channel is found, ensure_channel should call
         set_filter with the requested edges so the filter is authoritative
         regardless of what the existing channel currently has."""
@@ -185,7 +181,8 @@ class TestEnsureChannelFilterEdges:
             ssrc=ssrc, preset="iq", sample_rate=16000, frequency=45.375e6,
             snr=0.0, multicast_address="239.1.2.3", port=5004,
         )
-        mock_discover.return_value = {ssrc: existing}
+        # poll_channel finds the matching channel → reuse branch runs.
+        control.poll_channel = MagicMock(return_value=existing)
 
         control.ensure_channel(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,
@@ -198,8 +195,7 @@ class TestEnsureChannelFilterEdges:
             ssrc, low_edge=-500.0, high_edge=+500.0, kaiser_beta=11.0,
         )
 
-    @patch("ka9q.discovery.discover_channels")
-    def test_reuse_path_skips_set_filter_when_no_args(self, mock_discover):
+    def test_reuse_path_skips_set_filter_when_no_args(self):
         """When ensure_channel is called without filter args, the reuse
         path must NOT call set_filter — preserves prior behaviour and
         avoids a no-op TLV roundtrip."""
@@ -218,7 +214,8 @@ class TestEnsureChannelFilterEdges:
             ssrc=ssrc, preset="iq", sample_rate=16000, frequency=45.375e6,
             snr=0.0, multicast_address="239.1.2.3", port=5004,
         )
-        mock_discover.return_value = {ssrc: existing}
+        # poll_channel finds the matching channel → reuse branch runs.
+        control.poll_channel = MagicMock(return_value=existing)
 
         control.ensure_channel(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,

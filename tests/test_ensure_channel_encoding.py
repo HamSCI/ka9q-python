@@ -11,8 +11,7 @@ class TestEnsureChannelEncoding(unittest.TestCase):
         self.control.create_channel = MagicMock()
         self.control.verify_channel = MagicMock(return_value=True)
 
-    @patch('ka9q.discovery.discover_channels')
-    def test_ensure_channel_encoding_match(self, mock_discover):
+    def test_ensure_channel_encoding_match(self):
         """Verify that matching encoding reuses channel"""
         # Mock existing channel with F32 encoding
         ssrc = 12345
@@ -26,8 +25,10 @@ class TestEnsureChannelEncoding(unittest.TestCase):
             port=5004,
             encoding=Encoding.F32
         )
-        mock_discover.return_value = {ssrc: existing}
-        
+        # ensure_channel probes for an existing channel via poll_channel;
+        # return the matching F32 channel so the reuse branch runs.
+        self.control.poll_channel = MagicMock(return_value=existing)
+
         # Patch allocate_ssrc to return our mock SSRC
         with patch('ka9q.control.allocate_ssrc', return_value=ssrc):
             # Call ensure_channel asking for F32
@@ -41,8 +42,7 @@ class TestEnsureChannelEncoding(unittest.TestCase):
             # Should NOT call create_channel
             self.control.create_channel.assert_not_called()
 
-    @patch('ka9q.discovery.discover_channels')
-    def test_ensure_channel_encoding_mismatch(self, mock_discover):
+    def test_ensure_channel_encoding_mismatch(self):
         """Verify that mismatching encoding triggers recreation"""
         # Mock existing channel with S16 encoding
         ssrc = 12345
@@ -56,8 +56,10 @@ class TestEnsureChannelEncoding(unittest.TestCase):
             port=5004,
             encoding=Encoding.S16LE # Different encoding
         )
-        mock_discover.return_value = {ssrc: existing}
-        
+        # poll_channel finds the existing S16 channel; the encoding
+        # mismatch makes ensure_channel fall through to create_channel.
+        self.control.poll_channel = MagicMock(return_value=existing)
+
         # Patch allocate_ssrc to return our mock SSRC
         with patch('ka9q.control.allocate_ssrc', return_value=ssrc):
             # Call ensure_channel asking for F32

@@ -28,10 +28,10 @@ def _ensure_dest(ctrl: RadiodControl, *, destination=None) -> object:
         captured['destination'] = kwargs.get('destination')
         raise _ShortCircuit()
 
-    # ensure_channel re-imports discover_channels from ka9q.discovery
-    # *inside* the function body, so the patch target is the
-    # discovery module, not the control module's alias.
-    with patch('ka9q.discovery.discover_channels', return_value={}), \
+    # ensure_channel probes for an existing channel via poll_channel
+    # (real DNS + multicast I/O); stub it to None so we always fall
+    # through to the captured create_channel.
+    with patch.object(ctrl, 'poll_channel', return_value=None), \
          patch.object(ctrl, 'create_channel', side_effect=_capture):
         try:
             ctrl.ensure_channel(
