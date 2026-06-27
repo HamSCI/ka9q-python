@@ -93,7 +93,8 @@ from .rtp_recorder import (
     RTPHeader,
     RecordingMetrics,
     parse_rtp_header,
-    rtp_to_wallclock
+    rtp_to_utc,
+    rtp_to_wallclock,
 )
 from .stream_quality import (
     GapSource,
@@ -157,6 +158,7 @@ __all__ = [
     'RTPHeader',
     'RecordingMetrics',
     'parse_rtp_header',
+    'rtp_to_utc',
     'rtp_to_wallclock',
     
     # Stream API (sample-oriented)

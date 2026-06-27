@@ -124,13 +124,23 @@ def parse_rtp_header(data: bytes) -> Optional[RTPHeader]:
     )
 
 
-def rtp_to_wallclock(
+def rtp_to_utc(
     rtp_timestamp: int,
     channel: ChannelInfo,
     wallclock_hint_sec: Optional[float] = None,
 ) -> Optional[float]:
     """
-    Convert RTP timestamp to Unix wall-clock time
+    Convert an RTP timestamp to absolute UTC (Unix seconds).
+
+    The timing REFERENCE is radiod's GPS_TIME/RTP_TIMESNAP anchor, not the
+    host clock:  ``utc = gps_utc_at_snapshot + (rtp - rtp_at_snapshot)/rate``.
+    The host clock (``wallclock_hint_sec`` / ``time.time()``) is consulted for
+    ONE thing only — disambiguating the 32-bit RTP wrap epoch — and needs only
+    ±half-a-period accuracy.  It never contributes to the sub-period value.
+
+    (Formerly ``rtp_to_wallclock``; renamed 2026-06-27 — "wallclock" described
+    the OUTPUT format, not the reference, and misread as a host-clock
+    dependency.  ``rtp_to_wallclock`` remains as a deprecated alias below.)
 
     Uses the GPS_TIME/RTP_TIMESNAP timing information from radiod.
 
@@ -230,6 +240,11 @@ def rtp_to_wallclock(
 
     # Convert to Unix seconds
     return wall_time_ns / BILLION
+
+
+# Deprecated alias — kept so existing callers keep working.  Prefer
+# ``rtp_to_utc`` (the reference is RTP/GPS, not the host wall clock).
+rtp_to_wallclock = rtp_to_utc
 
 
 class RTPRecorder:
