@@ -1,5 +1,73 @@
 # Changelog
 
+## [3.17.0] - 2026-06-28
+
+First release marked **Production/Stable** (trove classifier 4 → 5). Folds in
+23 commits of feature and resilience work that had accumulated on `main` past
+the `v3.16.1` tag with no version bump.
+
+### Added
+
+- **`RadiodControl.poll_channel(ssrc)`** (`control.py`) — a targeted, O(1)
+  status probe for a single channel. Replaces the previous reliance on a full
+  channel discovery sweep when only one channel's state is needed.
+- **`MultiStream.prune_frequency(...)`** (`multi_stream.py`) — releases a
+  superseded channel slot *and its ring buffer*, fixing a ring leak when a
+  frequency is retuned/replaced within a live `MultiStream`.
+- **mDNS hostname + port surfaced by discovery** (`discovery.py`) — additive
+  fields on the discovery result; existing consumers are unaffected.
+- **RTP↔GPS offset-step detection (`anchor_epoch`)** (`stream.py`) — a
+  `RadiodStream` now detects a step in radiod's RTP↔GPS offset and re-anchors
+  its timing reference instead of carrying a stale anchor.
+
+### Changed
+
+- **`ensure_channel` now verifies via `poll_channel` (O(1))** instead of a dead
+  discovery sweep (`control.py`). Faster, more reliable channel confirmation.
+  Note a deliberate relaxation on the *create* path: the channel is now accepted
+  on **frequency match alone** — a rate/preset divergence is logged as a warning
+  (not raised) and the destination is no longer re-verified. Callers should treat
+  the returned `ChannelInfo` as authoritative for the granted encoding/rate
+  (the sigmond recorders already do). The reuse path still verifies strictly.
+- **`RadiodStream` binds the channel's multicast group**, not `0.0.0.0`
+  (`stream.py`) — avoids cross-talk on hosts carrying multiple multicast groups.
+- **`rtp_to_wallclock` renamed to `rtp_to_utc`** (`rtp_recorder.py`). The name
+  "wallclock" wrongly implied a system-clock dependency; the function is purely
+  RTP/GPS-referenced. `rtp_to_wallclock` remains as a deprecated alias — no
+  caller needs to change.
+- **`anchor_step_threshold_sec` raised 0.25 → 0.75** (`stream.py`) to tolerate
+  output-timing jitter on a busy radiod without spuriously re-anchoring.
+- **8 MB receive buffer on `poll_channel`'s status listener** (`control.py`) to
+  avoid drops while probing on a busy status multicast group.
+- **ka9q-radio compatibility pin advanced to `9b742e6`** (no protocol drift;
+  validated by `check_upstream_drift.py`).
+- **Repository moved to the HamSCI org**; project/doc/URL references updated
+  from `mijahauan/` to `HamSCI/`.
+
+### Fixed
+
+- **Gap storm now treated as a stream-health failure → re-subscribe**
+  (`multi_stream.py`, 228a041). A stale `MultiStream` subscription after a
+  radiod restart manifests as a sustained packet-gap storm (not silence); the
+  health monitor now detects it and re-subscribes, restoring delivery without
+  an external restart. See the sigmond `stale-subscription-gap-storm-protection`
+  note.
+
+### Packaging
+
+- **Removed the redundant `setup.py`.** All project metadata lives in
+  `pyproject.toml`'s PEP 621 `[project]` table (`setuptools.build_meta`
+  backend). `setup.py` had drifted to a stale `3.10.0` / `4 - Beta` duplicate
+  and was an unused second source of truth.
+
+### Docs / Tests
+
+- Added a **requirements baseline** (`docs/REQUIREMENTS.md`, `KQP-*` spec).
+- `CLAUDE.md` documents `MultiStream` as the fourth abstraction layer.
+- The **live channel-verification suite is now gated behind explicit opt-in**
+  (`--radiod-host`), so the default `pytest` run no longer hangs waiting on a
+  live radiod. Unit suite: 363 passed, 27 skipped.
+
 ## [3.16.1] - 2026-05-24
 
 ### Fixed
