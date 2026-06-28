@@ -16,7 +16,7 @@ timestamp radiod stamps on every packet.**  radiod's RTP counter is
 GPS/PPS-disciplined and advances by exactly one per output sample of real
 time, regardless of what the client's delivery bookkeeping does.  So:
 
-  * Anchor ONCE: map a single RTP timestamp to UTC via ``rtp_to_wallclock``
+  * Anchor ONCE: map a single RTP timestamp to UTC via ``rtp_to_utc``
     (the §18/METROLOGY RTP-reference rule — the only wall-clock-ish read).
   * Every slot boundary is an epoch-aligned UTC instant (a multiple of the
     cadence: FT8 :00/:15/:30/:45, FT4 every 7.5 s, WSPR every 120 s) whose
@@ -31,8 +31,16 @@ time, regardless of what the client's delivery bookkeeping does.  So:
 
 RTP timestamps are unsigned 32-bit and wrap (~99 h at 12 kHz, ~16 h at
 64 kHz IQ).  All differences use Phil Karn's signed-32 technique so a wrap
-is just normal arithmetic; absolute RTP positions are tracked as an
-unwrapped 64-bit count off the anchor.
+is just normal arithmetic.  Absolute RTP positions are tracked as an
+unwrapped 64-bit count off the anchor: a monotonic high-water offset is
+carried, and every wrapped timestamp is unwrapped *relative to that
+high-water* (not relative to the anchor).  This is what makes the offset
+correct for streams that run arbitrarily long past their anchor — a raw
+``anchor``-relative signed-32 diff would alias once the stream is more than
+2**31 samples (~49.7 h @ 12 kHz, ~9.3 h @ 64 kHz IQ) from the anchor, at
+which point ``advance`` would silently stop harvesting slots.  All real
+queries (the latest timestamp, a just-passed boundary) are within one slot
+of the high-water, so the unwrap is unambiguous.
 
 This class is pure timing logic — it owns no socket, ring, or thread.  The
 caller feeds it RTP timestamps and asks which slots are now complete.
@@ -83,7 +91,7 @@ class SlotClock:
     Usage::
 
         clk = SlotClock(cadence_sec=15.0, sample_rate=12000)
-        clk.anchor(rtp_timestamp=first_rtp, utc=rtp_to_wallclock(first_rtp, ci))
+        clk.anchor(rtp_timestamp=first_rtp, utc=rtp_to_utc(first_rtp, ci))
         ...
         # as packets arrive, advance the high-water mark and harvest slots:
         for slot in clk.advance(latest_rtp_timestamp):
@@ -114,6 +122,10 @@ class SlotClock:
         # have already emitted, as an offset in samples from the anchor.
         self._next_boundary_off: Optional[int] = None
         self._next_index: int = 0
+        # Monotonic high-water unwrapped offset from the anchor.  Every
+        # ``offset_of_rtp`` unwraps relative to this (never the bare anchor),
+        # so positions stay correct past the 2**31-sample signed-32 window.
+        self._latest_off: int = 0
 
     # ── anchoring ────────────────────────────────────────────────────
 
@@ -131,17 +143,20 @@ class SlotClock:
         self._anchor_rtp = None
         self._anchor_utc = None
         self._next_boundary_off = None
+        self._latest_off = 0
 
     def anchor(self, rtp_timestamp: int, utc: float) -> None:
         """Pin (rtp_timestamp -> utc).  Call once; call again to re-anchor.
 
-        ``utc`` should come from ``ka9q.rtp_to_wallclock(rtp_timestamp, ci)``
+        ``utc`` should come from ``ka9q.rtp_to_utc(rtp_timestamp, ci)``
         so the whole grid is RTP/GPS-referenced.  Re-anchoring preserves the
         monotonic slot index but recomputes the first upcoming boundary, so a
         corrected anchor takes effect on the next clean boundary.
         """
         self._anchor_rtp = int(rtp_timestamp) & 0xFFFFFFFF
         self._anchor_utc = float(utc)
+        # The anchor IS offset 0; the unwrap high-water restarts here.
+        self._latest_off = 0
         # First epoch-aligned boundary at or after the anchor instant.
         t0 = math.ceil(self._anchor_utc / self.cadence_sec) * self.cadence_sec
         self._next_boundary_off = int(round((t0 - self._anchor_utc) * self.sample_rate))
@@ -165,9 +180,22 @@ class SlotClock:
         return (self._anchor_rtp + sample_off) & 0xFFFFFFFF
 
     def offset_of_rtp(self, rtp_timestamp: int) -> int:
-        """Unwrapped sample offset from the anchor for a wrapped RTP ts."""
+        """Unwrapped 64-bit sample offset from the anchor for a wrapped RTP ts.
+
+        Unwraps relative to the monotonic high-water (``_latest_off``), not the
+        bare anchor, so the result stays correct once the stream is more than
+        2**31 samples past the anchor.  Callers query this only for timestamps
+        near the stream's leading edge (the latest timestamp, or a boundary
+        within the last slot), which are always within one signed-32 window of
+        the high-water — so the unwrap is unambiguous.  Advances the high-water
+        when a query is ahead of it; never rewinds it on a stale/past query.
+        """
         assert self._anchor_rtp is not None
-        return rtp_diff(rtp_timestamp, self._anchor_rtp)
+        ref_rtp = (self._anchor_rtp + self._latest_off) & 0xFFFFFFFF
+        off = self._latest_off + rtp_diff(rtp_timestamp, ref_rtp)
+        if off > self._latest_off:
+            self._latest_off = off
+        return off
 
     # ── slot harvesting ──────────────────────────────────────────────
 
@@ -201,21 +229,25 @@ class SlotClock:
 
     # ── RTP-reference re-validation ──────────────────────────────────
 
-    def divergence_sec(self, channel_info, rtp_to_wallclock) -> Optional[float]:
+    def divergence_sec(self, channel_info, rtp_to_utc) -> Optional[float]:
         """Grid-vs-GPS divergence at the next boundary, in seconds.
 
         Recomputes the next boundary's true UTC straight from radiod's
-        (StatusListener-refreshed) ``channel_info`` via ``rtp_to_wallclock``
+        (StatusListener-refreshed) ``channel_info`` via ``rtp_to_utc``
         and compares it to the grid projection.  A sustained nonzero result
         means the anchor is stale/wrong — the caller should ``anchor()``
         again off the fresh reference.  Returns None if it can't be computed.
+
+        ``rtp_to_utc`` is passed in (rather than imported) so the caller binds
+        the exact projector it anchored with; ``ka9q.rtp_to_wallclock`` works
+        too as a deprecated alias of the same function.
         """
         if self._anchor_rtp is None or self._next_boundary_off is None:
             return None
         boundary_rtp = self.rtp_of_offset(self._next_boundary_off)
         projected = self.utc_of_offset(self._next_boundary_off)
         try:
-            ref = rtp_to_wallclock(
+            ref = rtp_to_utc(
                 boundary_rtp, channel_info, wallclock_hint_sec=projected,
             )
         except Exception as exc:  # noqa: BLE001 — detection must not crash audio

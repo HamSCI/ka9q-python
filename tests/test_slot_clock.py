@@ -91,6 +91,51 @@ def test_offset_of_rtp_roundtrip():
     assert clk.offset_of_rtp(rtp) == off
 
 
+def test_long_run_past_signed32_window_keeps_harvesting():
+    """Regression: a stream running past 2**31 samples from the anchor must
+    keep harvesting slots.  A bare anchor-relative signed-32 diff aliases at
+    ~49.7 h @ 12 kHz and silently stops `advance` (real RF, no slots -> 0
+    decodes); the high-water unwrap must carry through it.
+
+    Steps the leading edge in 1-hour jumps (43.2M samples << 2**31, so each
+    individual unwrap is unambiguous) across the ~49.7 h boundary out to 55 h.
+    """
+    clk = SlotClock(15.0, SR, settle_sec=1.5)
+    clk.anchor(rtp_timestamp=0, utc=900_000_000.0)  # multiple of 15 -> boundary0 at offset 0
+    samples_per_hour = 3600 * SR  # 43,200,000  (< 2**31 = 2,147,483,648)
+    boundary_hour = (2 ** 31) / samples_per_hour  # ~49.7 h
+    last_index = -1
+    crossed = False
+    for hour in range(1, 56):
+        latest_off = hour * samples_per_hour
+        latest_rtp = latest_off & 0xFFFFFFFF
+        for s in clk.advance(latest_rtp):
+            # contiguous, monotonic indices and exact 15 s grid throughout
+            assert s.index == last_index + 1
+            assert abs(s.start_utc - (900_000_000.0 + s.index * 15.0)) < 1e-3
+            last_index = s.index
+        if hour > boundary_hour:
+            crossed = True
+            # still producing slots well past the old-bug cutoff
+            assert last_index > int(boundary_hour * 3600 / 15)
+    assert crossed
+    # 55 h / 15 s ≈ 13200 slots; we should be near the end, not stalled early
+    assert last_index > 13000
+
+
+def test_offset_of_rtp_unwraps_past_window():
+    """offset_of_rtp must return the true 64-bit offset past 2**31, not alias."""
+    clk = SlotClock(15.0, SR)
+    clk.anchor(rtp_timestamp=7, utc=900_000_000.0)
+    # walk the high-water forward in sub-2**31 steps to 3 billion samples
+    step = 2 ** 30  # 1,073,741,824
+    off = 0
+    for _ in range(3):
+        off += step
+        assert clk.offset_of_rtp((7 + off) & 0xFFFFFFFF) == off
+    assert off > 2 ** 31  # we genuinely crossed the signed-32 boundary
+
+
 def test_settle_delays_completion():
     clk = SlotClock(15.0, SR, settle_sec=2.0)
     clk.anchor(rtp_timestamp=0, utc=900_000_000.0)  # 900000000 % 15 == 0 -> boundary0 at offset 0
