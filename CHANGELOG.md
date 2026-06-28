@@ -1,5 +1,32 @@
 # Changelog
 
+## [3.18.0] - 2026-06-28
+
+### Added
+
+- **`SlotClock` — epoch-aligned slot boundaries in RTP-timestamp space**
+  (`ka9q.slot_clock`). The canonical, drift-immune timing primitive for every
+  sigmond slot/period recorder (psk FT8/FT4, wspr WSPR/FST4W, meteor-scatter,
+  …). Slot boundaries are driven by radiod's GPSDO-disciplined RTP timestamp
+  (which advances exactly once per output sample of real time) rather than a
+  delivered-sample-count projection that silently drifts when the receive path
+  over/under-counts samples — the failure that labels a WAV with a UTC the audio
+  doesn't match and zeroes out decodes on good RF. Boundary stepping is exact
+  integer arithmetic (`cadence_sec * sample_rate` must be integer). Absolute
+  positions are tracked as an unwrapped 64-bit count relative to a monotonic
+  high-water, so harvesting keeps working past the 2³¹-sample signed-32 window
+  (~49.7 h @ 12 kHz / ~9.3 h @ 64 kHz IQ) — a long WSPR run no longer stalls.
+  Exposes `SlotClock`, `Slot`, and `rtp_diff` (Karn signed-32 difference).
+  Pure timing logic — owns no socket, ring, or thread.
+
+### Notes
+
+- This is the release that promotes `SlotClock` (previously parked) to public,
+  consumed API: the sigmond recorders are migrating their slot/period timing
+  onto it so an upstream timing fix lands once instead of being re-patched per
+  client. Pairs with `hamsci_dsp.timing.acquire_anchor_utc` (the shared RTP→UTC
+  anchor) on the sigmond side.
+
 ## [3.17.0] - 2026-06-28
 
 First release marked **Production/Stable** (trove classifier 4 → 5). Folds in

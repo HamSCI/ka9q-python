@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ka9q-python"
-version = "3.17.0"
+version = "3.18.0"
 description = "Python interface for ka9q-radio control and monitoring"
 readme = "README.md"
 authors = [
