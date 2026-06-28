@@ -132,9 +132,6 @@ class ChannelInfo:
         ``_anchor_pair``.  Tuple is written first so the atomic snapshot
         is the leading edge of any state change.
         """
-        # Snapshot the previous pair BEFORE overwriting, for step detection.
-        prev = getattr(self, '_anchor_pair', None)
-
         # Atomic pair first — this is the source of truth for
         # transactional readers.
         self._anchor_pair = (gps_time, rtp_timesnap)
@@ -144,36 +141,14 @@ class ChannelInfo:
         # ``.gps_time`` directly sees the current value.
         self.gps_time = gps_time
         self.rtp_timesnap = rtp_timesnap
-
-        # ── Offset-step detection ──
-        # Consecutive snapshots are ~450 ms apart, so the signed 32-bit RTP
-        # delta is tiny (no wrap ambiguity, unlike the projection path in
-        # rtp_to_wallclock).  ``move_sec`` is the change in the RTP→GPS
-        # mapping: ~0 when radiod is consistent, a gross jump when it steps.
-        # Only the StatusListener thread calls update_anchor (single writer),
-        # so the ``anchor_epoch += 1`` read-modify-write is race-free; the
-        # epoch is bumped AFTER ``_anchor_pair`` is published so any reader
-        # that observes the new epoch also reads the new (or newer) anchor.
-        if (
-            prev is not None
-            and prev[0] is not None
-            and prev[1] is not None
-            and self.sample_rate
-        ):
-            d_rtp = int((rtp_timesnap - prev[1]) & 0xFFFFFFFF)
-            if d_rtp > 0x7FFFFFFF:
-                d_rtp -= 0x100000000
-            move_sec = (
-                (gps_time - prev[0]) - d_rtp * 1_000_000_000 / self.sample_rate
-            ) / 1e9
-            if abs(move_sec) > self.anchor_step_threshold_sec:
-                self.last_offset_step_sec = move_sec
-                self.anchor_epoch += 1
-                logger.warning(
-                    "ChannelInfo ssrc=%s: radiod RTP↔GPS offset STEPPED "
-                    "%+.3fs — anchor_epoch=%d (consumers will re-anchor)",
-                    self.ssrc, move_sec, self.anchor_epoch,
-                )
+        # NOTE (2026-06-28): the per-update RTP↔GPS offset-step detection was
+        # removed.  It compared consecutive ~450 ms status snapshots and bumped
+        # ``anchor_epoch`` (with a loud WARNING) on any jump — but a busy
+        # radiod's status pair jitters/tears at that cadence, so it fired
+        # constantly and drove downstream recorders into a re-anchor storm.
+        # We now simply adopt the latest pair and defer to radiod's RTP; the
+        # ``anchor_epoch`` / ``last_offset_step_sec`` fields remain (vestigial,
+        # at their defaults) for backward compatibility.
 
 
 def _create_status_listener_socket(multicast_addr: str, interface: Optional[str] = None) -> socket.socket:

@@ -1,5 +1,34 @@
 # Changelog
 
+## [3.19.0] - 2026-06-28
+
+### Removed / Changed — simplify how we look at radiod (defer to RTP)
+
+- **Removed `SlotClock.divergence_sec`** (added in 3.18.0). It recomputed a
+  boundary's UTC from the live, StatusListener-refreshed `channel_info` and
+  compared it to the grid — inviting consumers to re-anchor when the two
+  disagree. In practice a busy radiod's status pair (`gps_time`/`rtp_timesnap`)
+  jitters ~0.45 s and occasionally tears between ~450 ms snapshots, so the check
+  reported large spurious divergences and drove downstream recorders into a
+  re-anchor storm. The `SlotClock` grid is RTP-driven and drift-immune by
+  design; nothing should second-guess it against the noisy status feed.
+
+- **Removed the per-update RTP↔GPS offset-step detection in
+  `ChannelInfo.update_anchor`** (`discovery.py`). It bumped `anchor_epoch` and
+  logged a loud `radiod RTP↔GPS offset STEPPED … (consumers will re-anchor)`
+  WARNING whenever consecutive status snapshots implied a stepped offset — but
+  that "step" was almost always status-feed jitter/tearing, not a real radiod
+  slide (radiod's RTP data path stayed consistent; decodes never stopped).
+  `update_anchor` now simply adopts the latest anchor pair. The `anchor_epoch`,
+  `last_offset_step_sec`, and `anchor_step_threshold_sec` fields remain
+  (vestigial, at their defaults) for backward compatibility.
+
+The principle: **anchor once off radiod's RTP timestamp and defer to it.** A
+genuine radiod restart is still handled downstream via the stream-restored path
+(MultiStream's drop/restore callback), not by polling the status feed for
+divergence. The sigmond recorders (psk/meteor/wspr) drop their matching
+re-anchor machinery in lockstep.
+
 ## [3.18.0] - 2026-06-28
 
 ### Added

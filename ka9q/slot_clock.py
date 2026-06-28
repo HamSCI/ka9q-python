@@ -226,33 +226,3 @@ class SlotClock:
             self._next_boundary_off = start_off + self.cadence_samples
             self._next_index += 1
         return out
-
-    # ── RTP-reference re-validation ──────────────────────────────────
-
-    def divergence_sec(self, channel_info, rtp_to_utc) -> Optional[float]:
-        """Grid-vs-GPS divergence at the next boundary, in seconds.
-
-        Recomputes the next boundary's true UTC straight from radiod's
-        (StatusListener-refreshed) ``channel_info`` via ``rtp_to_utc``
-        and compares it to the grid projection.  A sustained nonzero result
-        means the anchor is stale/wrong — the caller should ``anchor()``
-        again off the fresh reference.  Returns None if it can't be computed.
-
-        ``rtp_to_utc`` is passed in (rather than imported) so the caller binds
-        the exact projector it anchored with; ``ka9q.rtp_to_wallclock`` works
-        too as a deprecated alias of the same function.
-        """
-        if self._anchor_rtp is None or self._next_boundary_off is None:
-            return None
-        boundary_rtp = self.rtp_of_offset(self._next_boundary_off)
-        projected = self.utc_of_offset(self._next_boundary_off)
-        try:
-            ref = rtp_to_utc(
-                boundary_rtp, channel_info, wallclock_hint_sec=projected,
-            )
-        except Exception as exc:  # noqa: BLE001 — detection must not crash audio
-            logger.debug("SlotClock divergence check raised: %s", exc)
-            return None
-        if ref is None:
-            return None
-        return projected - ref
