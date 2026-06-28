@@ -85,6 +85,8 @@ class _ChannelSlot:
     dropped: bool = False
     first_rtp_timestamp: Optional[int] = None
     lifetime: Optional[int] = None
+    last_gaps: int = 0          # resequencer gaps_detected at last health check
+    gap_storm_secs: float = 0.0  # how long the gap rate has stayed pathological
 
 
 class MultiStream:
@@ -104,6 +106,8 @@ class MultiStream:
         deliver_interval_packets: int = 10,
         samples_per_packet: int = 320,
         resequence_buffer_size: int = 64,
+        gap_storm_rate_per_sec: float = 25.0,
+        gap_storm_window_sec: Optional[float] = None,
     ):
         self._control = control
         self._drop_timeout_sec = drop_timeout_sec
@@ -111,6 +115,17 @@ class MultiStream:
         self._deliver_interval = deliver_interval_packets
         self._samples_per_packet = samples_per_packet
         self._resequence_buffer_size = resequence_buffer_size
+        # A gap *storm* — packets still arriving but the resequencer logging
+        # gaps at a high sustained rate — is a wedged/stale subscription that
+        # silence-based drop detection misses (the stream looks "healthy" while
+        # delivering shredded audio).  Maintaining a healthy RTP stream is this
+        # library's job, so treat a sustained storm like a drop and
+        # re-subscribe.  Defaults: ≥25 gaps/s sustained for drop_timeout_sec.
+        self._gap_storm_rate = gap_storm_rate_per_sec
+        self._gap_storm_window = (
+            gap_storm_window_sec if gap_storm_window_sec is not None
+            else drop_timeout_sec
+        )
 
         self._slots: Dict[int, _ChannelSlot] = {}
         self._multicast_address: Optional[str] = None
@@ -529,6 +544,31 @@ class MultiStream:
                             f"No packets for {silence:.1f}s "
                             f"(timeout: {self._drop_timeout_sec}s)",
                         )
+                    elif self._gap_storm(slot, check_interval):
+                        self._handle_drop(
+                            ssrc, slot,
+                            f"gap storm: ≥{self._gap_storm_rate:.0f} gaps/s "
+                            f"sustained {self._gap_storm_window:.0f}s — "
+                            f"wedged/stale subscription",
+                        )
+
+    def _gap_storm(self, slot: _ChannelSlot, interval: float) -> bool:
+        """True once the resequencer gap rate has stayed pathological for the
+        configured window.  Packets are still arriving (silence-drop misses
+        this), but the stream is delivering shredded audio — a stale/wedged
+        subscription that a re-subscribe fixes.
+        """
+        gaps = slot.resequencer.stats.gaps_detected
+        delta = max(0, gaps - slot.last_gaps)   # max(0,…) survives a restore reset
+        slot.last_gaps = gaps
+        if interval > 0 and (delta / interval) >= self._gap_storm_rate:
+            slot.gap_storm_secs += interval
+        else:
+            slot.gap_storm_secs = 0.0
+        if slot.gap_storm_secs >= self._gap_storm_window:
+            slot.gap_storm_secs = 0.0           # _handle_drop → _attempt_restore follows
+            return True
+        return False
 
     def _handle_drop(self, ssrc: int, slot: _ChannelSlot, reason: str) -> None:
         logger.warning(
@@ -567,6 +607,8 @@ class MultiStream:
             slot.sample_buffer.clear()
             slot.gap_buffer.clear()
             slot.packets_since_delivery = 0
+            slot.last_gaps = 0
+            slot.gap_storm_secs = 0.0
 
             logger.info(
                 f"MultiStream: {slot.frequency_hz/1e6:.3f} MHz restored "
