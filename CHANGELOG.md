@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.20.0] - 2026-06-29
+
+### Added — `SlotClock` ambiguous-unwrap guard (fail loud, never silent)
+
+- **`SlotClock.offset_of_rtp` now raises `SlotClockDesyncError`** when a wrapped
+  RTP timestamp is more than `2**30` samples (half the signed-32 window, ~24.8 h
+  @ 12 kHz / ~4.7 h @ 64 kHz IQ) from the unwrap high-water in either direction.
+  The high-water unwrap (3.18.0) keeps continuous streams correct past the
+  `2**31` window, but it only disambiguates while each step stays within
+  `±2**31` of the high-water. A *single* forward jump `>= 2**31` samples (a
+  `>49.7 h` stall-then-resume, a missed re-anchor, or a discontinuous timestamp)
+  aliased into a backward step — `advance()` then harvested **0 slots forever on
+  live RF**, the exact silent failure `SlotClock` exists to prevent.
+- **`SlotClock.advance` catches the desync, logs an ERROR, drops the anchor, and
+  returns `[]`**, so the caller's normal `if not clk.anchored: clk.anchor(...)`
+  path re-establishes the grid on a fresh RTP reference instead of stalling. The
+  `2**30` margin never false-fires: continuous advancing steps a few hundred
+  samples per call.
+- **`SlotClockDesyncError` is exported** from the package.
+
 ## [3.19.0] - 2026-06-28
 
 ### Removed / Changed — simplify how we look at radiod (defer to RTP)
