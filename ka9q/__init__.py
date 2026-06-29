@@ -115,7 +115,7 @@ from .managed_stream import (
     StreamState,
 )
 from .multi_stream import MultiStream
-from .slot_clock import SlotClock, Slot, rtp_diff
+from .slot_clock import SlotClock, Slot, SlotClockDesyncError, rtp_diff
 from .spectrum_stream import SpectrumStream
 from .status_listener import StatusListener, StatusListenerStats
 
@@ -165,6 +165,7 @@ __all__ = [
     # Slot timing (epoch-aligned, RTP-referenced)
     'SlotClock',
     'Slot',
+    'SlotClockDesyncError',
     'rtp_diff',
 
     # Stream API (sample-oriented)

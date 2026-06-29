@@ -3,7 +3,13 @@ import math
 
 import pytest
 
-from ka9q.slot_clock import SlotClock, Slot, rtp_diff
+from ka9q.slot_clock import (
+    SlotClock,
+    Slot,
+    SlotClockDesyncError,
+    rtp_diff,
+    _SAFE_UNWRAP_SAMPLES,
+)
 
 
 SR = 12000
@@ -134,6 +140,44 @@ def test_offset_of_rtp_unwraps_past_window():
         off += step
         assert clk.offset_of_rtp((7 + off) & 0xFFFFFFFF) == off
     assert off > 2 ** 31  # we genuinely crossed the signed-32 boundary
+
+
+def test_safe_unwrap_limit_allows_full_half_window_step():
+    """A single step of exactly the safe limit (half the signed-32 window) is
+    still unambiguous and must be accepted — the guard rejects only *past* it."""
+    clk = SlotClock(15.0, SR)
+    clk.anchor(rtp_timestamp=0, utc=900_000_000.0)
+    off = _SAFE_UNWRAP_SAMPLES
+    assert clk.offset_of_rtp(off & 0xFFFFFFFF) == off
+
+
+def test_offset_of_rtp_raises_on_ambiguous_jump():
+    """A single unwrap step past the safe half-window can alias a huge forward
+    jump into a backward step; offset_of_rtp must raise rather than guess."""
+    clk = SlotClock(15.0, SR)
+    clk.anchor(rtp_timestamp=0, utc=900_000_000.0)
+    with pytest.raises(SlotClockDesyncError):
+        clk.offset_of_rtp((_SAFE_UNWRAP_SAMPLES + 1) & 0xFFFFFFFF)
+
+
+def test_advance_big_jump_fails_loud_and_drops_anchor(caplog):
+    """Regression: a single advance() forward jump > 2**31 from the anchor used
+    to alias to a backward step and silently harvest 0 slots forever (live RF,
+    zero decodes).  The guard must instead log loudly, drop the anchor, and
+    return [] so the caller re-anchors — turning a silent stall into recovery."""
+    clk = SlotClock(15.0, SR, settle_sec=1.5)
+    clk.anchor(rtp_timestamp=0, utc=900_000_000.0)
+    # 50 h in samples: 2,160,000,000 > 2**31 (2,147,483,648) in ONE call.
+    big = 50 * 3600 * SR & 0xFFFFFFFF
+    with caplog.at_level("ERROR"):
+        slots = clk.advance(big)
+    assert slots == []                 # no garbage slots
+    assert not clk.anchored            # anchor dropped -> caller must re-anchor
+    assert any("SlotClock" in r.message for r in caplog.records)
+    # and recovery works: re-anchor near the real leading edge, harvest normally
+    clk.anchor(rtp_timestamp=big, utc=900_180_000.0)  # multiple of 15
+    out = clk.advance((big + 180000 + 24000 + 1) & 0xFFFFFFFF)
+    assert len(out) == 1 and out[0].index == 0
 
 
 def test_settle_delays_completion():

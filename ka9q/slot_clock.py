@@ -68,6 +68,28 @@ def rtp_diff(a: int, b: int) -> int:
     return d
 
 
+# Largest single unwrap step (in samples) we trust from the high-water.  The
+# signed-32 unwrap is only unambiguous within +/-2**31 of the high-water; we
+# refuse anything past the half-window (2**30 ~= 24.8 h @ 12 kHz, ~4.7 h @
+# 64 kHz IQ) so the unwrap fails LOUD with a wide margin instead of silently
+# aliasing a huge forward jump into a backward step (-> advance() harvests 0
+# slots on live RF: the exact silent failure SlotClock exists to prevent).
+# Continuous advancing steps by a few hundred samples per call, so this never
+# false-fires in normal operation — only a >24.8 h stall, a missed re-anchor,
+# or a bogus/discontinuous timestamp reaches it.
+_SAFE_UNWRAP_SAMPLES = 2 ** 30
+
+
+class SlotClockDesyncError(RuntimeError):
+    """A wrapped RTP timestamp is too far from the unwrap high-water to be
+    disambiguated (a >24.8 h gap, a missed re-anchor, or a discontinuous/bogus
+    timestamp).  The grid can no longer be trusted from this timestamp alone;
+    the caller must re-anchor against a fresh RTP reference.  ``advance``
+    catches this, drops the anchor, and returns no slots, so the caller's
+    normal ``if not clk.anchored: clk.anchor(...)`` path re-establishes the
+    grid rather than silently stalling at zero decodes."""
+
+
 @dataclass(frozen=True)
 class Slot:
     """One completed, epoch-aligned slot.
@@ -189,10 +211,26 @@ class SlotClock:
         within the last slot), which are always within one signed-32 window of
         the high-water — so the unwrap is unambiguous.  Advances the high-water
         when a query is ahead of it; never rewinds it on a stale/past query.
+
+        Raises ``SlotClockDesyncError`` if the timestamp is more than
+        ``_SAFE_UNWRAP_SAMPLES`` (half the signed-32 window) from the
+        high-water in either direction: at that distance a wrapped 32-bit
+        value can no longer be told apart from a ~2**32-aliased one, so any
+        unwrap would be a guess.  This converts the old silent alias (huge
+        forward jump read as a backward step -> 0 slots forever) into a loud,
+        recoverable signal.
         """
         assert self._anchor_rtp is not None
         ref_rtp = (self._anchor_rtp + self._latest_off) & 0xFFFFFFFF
-        off = self._latest_off + rtp_diff(rtp_timestamp, ref_rtp)
+        delta = rtp_diff(rtp_timestamp, ref_rtp)
+        if abs(delta) > _SAFE_UNWRAP_SAMPLES:
+            raise SlotClockDesyncError(
+                f"rtp={rtp_timestamp} is {delta} samples from the unwrap "
+                f"high-water (offset {self._latest_off}); |delta| exceeds the "
+                f"safe window {_SAFE_UNWRAP_SAMPLES} — cannot unwrap "
+                f"unambiguously, re-anchor required"
+            )
+        off = self._latest_off + delta
         if off > self._latest_off:
             self._latest_off = off
         return off
@@ -209,7 +247,21 @@ class SlotClock:
         """
         if self._anchor_rtp is None or self._next_boundary_off is None:
             return []
-        latest_off = self.offset_of_rtp(latest_rtp_timestamp)
+        try:
+            latest_off = self.offset_of_rtp(latest_rtp_timestamp)
+        except SlotClockDesyncError as exc:
+            # A wrapped timestamp this far from the high-water can't be
+            # unwrapped safely.  Fail LOUD and drop the anchor so the caller's
+            # ``if not anchored: anchor()`` path re-establishes the grid on a
+            # fresh RTP reference — instead of silently harvesting 0 slots on
+            # live RF (the failure mode this whole class exists to prevent).
+            logger.error(
+                "SlotClock(cadence=%.3fs, sr=%d): %s; dropping anchor to force "
+                "a clean re-anchor (was at slot index %d)",
+                self.cadence_sec, self.sample_rate, exc, self._next_index,
+            )
+            self.reset()
+            return []
         out: List[Slot] = []
         while latest_off >= (
             self._next_boundary_off + self.cadence_samples + self.settle_samples
