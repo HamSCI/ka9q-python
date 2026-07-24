@@ -83,6 +83,25 @@ _MULAW_TABLE = _build_mulaw_table()
 _ALAW_TABLE = _build_alaw_table()
 
 
+# Bytes per sample COMPONENT on the wire for each linear-PCM encoding.
+# An audio frame is one component; an IQ frame is two.  Used to
+# cross-check a channel's claimed encoding against what radiod actually
+# sends (payload bytes / RTP timestamp ticks) — see
+# MultiStream._verify_slot_encoding.  Opus/AX25 are framed codecs with
+# no fixed bytes-per-sample and are deliberately absent.
+ENCODING_SAMPLE_BYTES = {
+    Encoding.NO_ENCODING: 4,  # decoded as F32LE
+    Encoding.S16LE: 2,
+    Encoding.S16BE: 2,
+    Encoding.F32LE: 4,
+    Encoding.F32BE: 4,
+    Encoding.F16LE: 2,
+    Encoding.F16BE: 2,
+    Encoding.MULAW: 1,
+    Encoding.ALAW: 1,
+}
+
+
 def parse_rtp_samples(
     payload: bytes, encoding: int, is_iq: bool
 ) -> Optional[np.ndarray]:

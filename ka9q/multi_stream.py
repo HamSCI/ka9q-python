@@ -53,7 +53,7 @@ import numpy as np
 from .discovery import ChannelInfo
 from .resequencer import PacketResequencer, RTPPacket
 from .rtp_recorder import RTPHeader, parse_rtp_header, rtp_to_wallclock
-from .stream import SampleCallback, parse_rtp_samples
+from .stream import ENCODING_SAMPLE_BYTES, SampleCallback, parse_rtp_samples
 from .stream_quality import GapEvent, GapSource, StreamQuality
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,15 @@ class _ChannelSlot:
     lifetime: Optional[int] = None
     last_gaps: int = 0          # resequencer gaps_detected at last health check
     gap_storm_secs: float = 0.0  # how long the gap rate has stayed pathological
+    # Wire-format verification of the granted encoding (see
+    # _verify_slot_encoding): the encoding the caller REQUESTED, the
+    # (seq, timestamp, payload_len) of the previous raw packet, and
+    # confirm/mismatch streak counters.  enc_verified stops the check.
+    requested_encoding: int = 0
+    enc_prev: Optional[tuple] = None
+    enc_confirms: int = 0
+    enc_mismatches: int = 0
+    enc_verified: bool = False
 
 
 class MultiStream:
@@ -231,6 +240,7 @@ class MultiStream:
             preset=preset,
             sample_rate=sample_rate,
             encoding=granted_encoding,
+            requested_encoding=encoding,
             is_iq=is_iq,
             resequencer=PacketResequencer(
                 buffer_size=self._resequence_buffer_size,
@@ -467,6 +477,12 @@ class MultiStream:
             if not payload:
                 continue
 
+            # Cross-check the granted encoding against the wire before
+            # trusting it (B4 2026-07-24: stale ChannelInfo grant during a
+            # channel-creation burst froze S16 while radiod streamed F32).
+            if not slot.enc_verified and not header.padding:
+                self._verify_slot_encoding(slot, header, len(payload))
+
             # Parse samples
             samples = parse_rtp_samples(payload, slot.encoding, slot.is_iq)
             if samples is None:
@@ -492,6 +508,87 @@ class MultiStream:
 
                 if slot.packets_since_delivery >= slot.deliver_interval:
                     self._deliver(slot)
+
+    # ── encoding verification ──
+
+    def _verify_slot_encoding(
+        self, slot: _ChannelSlot, header: RTPHeader, payload_len: int
+    ) -> None:
+        """Cross-check slot.encoding against the actual wire format.
+
+        The encoding radiod GRANTS (cached from ensure_channel's
+        ChannelInfo) can be stale: during a channel-creation burst the
+        status snapshot may be taken before radiod applies the encoding
+        command (B4 reboot 2026-07-24 — every WSPR channel streamed F32
+        but the grant said S16, so each 4-byte float was decoded as two
+        int16s: 2x the samples, garbage audio, and a slot clock running
+        2x real time).  The wire itself is unambiguous: for consecutive
+        packets, payload bytes divided by RTP timestamp ticks gives
+        bytes per frame.
+
+        After 3 consecutive packet pairs agreeing with slot.encoding the
+        slot is marked verified and the check stops.  If 3 consecutive
+        pairs instead match the encoding the caller REQUESTED, the slot
+        is corrected to it — loudly, since earlier packets were parsed
+        wrong.  A stable width matching neither is alarmed once and left
+        alone (we have no better candidate than the grant).
+        """
+        prev = slot.enc_prev
+        slot.enc_prev = (header.sequence, header.timestamp, payload_len)
+        if prev is None:
+            return
+        prev_seq, prev_ts, prev_len = prev
+        if ((prev_seq + 1) & 0xFFFF) != header.sequence:
+            return  # reorder/loss — need adjacent packets to count ticks
+        ts_delta = (header.timestamp - prev_ts) & 0xFFFFFFFF
+        if not 0 < ts_delta <= 1 << 20:
+            return
+        if prev_len % ts_delta:
+            return  # non-integral bytes/frame: framed codec or oddball
+        per_frame = prev_len // ts_delta
+        components = 2 if slot.is_iq else 1
+
+        expected = ENCODING_SAMPLE_BYTES.get(slot.encoding)
+        if expected is not None and per_frame == expected * components:
+            slot.enc_mismatches = 0
+            slot.enc_confirms += 1
+            if slot.enc_confirms >= 3:
+                slot.enc_verified = True
+            return
+
+        slot.enc_confirms = 0
+        slot.enc_mismatches += 1
+        if slot.enc_mismatches < 3:
+            return
+
+        requested = slot.requested_encoding
+        req_bytes = ENCODING_SAMPLE_BYTES.get(requested)
+        freq_mhz = slot.frequency_hz / 1e6
+        if (
+            requested != slot.encoding
+            and req_bytes is not None
+            and per_frame == req_bytes * components
+        ):
+            logger.error(
+                f"ENCODING MISMATCH ssrc={slot.channel_info.ssrc} "
+                f"({freq_mhz:.3f} MHz): granted encoding "
+                f"{slot.encoding} implies {expected} B/sample but wire "
+                f"carries {per_frame} B/frame — matches the REQUESTED "
+                f"encoding {requested}; correcting.  Samples parsed "
+                f"before this point were garbage (stale ChannelInfo "
+                f"grant during channel setup?)"
+            )
+            slot.encoding = requested
+        else:
+            logger.error(
+                f"ENCODING MISMATCH ssrc={slot.channel_info.ssrc} "
+                f"({freq_mhz:.3f} MHz): wire carries {per_frame} B/frame "
+                f"but granted encoding {slot.encoding} implies "
+                f"{expected} B/sample x {components} and requested "
+                f"encoding {requested} does not match either — leaving "
+                f"grant in place; decoded audio is suspect"
+            )
+        slot.enc_verified = True
 
     # ── delivery ──
 
