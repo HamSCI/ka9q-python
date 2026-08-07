@@ -31,7 +31,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Union
-from .types import StatusType, CMD
+from .types import StatusType, CMD, Encoding
 from .discovery import discover_channels
 from .exceptions import ConnectionError, CommandError, ValidationError
 from .utils import resolve_multicast_address
@@ -813,6 +813,16 @@ def decode_status_dict(buffer: bytes) -> dict:
     return status
 
 
+def _encoding_name(value: Optional[int]) -> str:
+    """Render an encoding value as 'NAME(n)' for log messages."""
+    if value is None:
+        return "unknown"
+    for name, val in vars(Encoding).items():
+        if not name.startswith("_") and val == value:
+            return f"{name}({value})"
+    return f"UNKNOWN({value})"
+
+
 class RadiodControl:
     """
     Control interface for radiod
@@ -855,6 +865,13 @@ class RadiodControl:
         self._status_sock = None  # Cached status listener socket for tune()
         self._status_sock_lock = None  # Will be initialized when needed
         self._socket_lock = threading.RLock()  # Protect control socket operations
+
+        # Encoding requested per SSRC, so the keepalive can re-assert it and
+        # verify_channel() can tell a granted encoding from a silently lost one.
+        # radiod takes OUTPUT_ENCODING only as a follow-up command (see
+        # create_channel), which makes the grant easy to drop and impossible to
+        # notice; HamSCI/ka9q-python#3.
+        self._requested_encoding: Dict[int, int] = {}
 
         # Optional continuous STATUS listener (live timing anchor refresh).
         # Lazily created by start_status_listener(); see ka9q.status_listener.
@@ -1446,21 +1463,37 @@ class RadiodControl:
             encode_eol(encbuffer)
             
             self.send_command(encbuffer)
+            self._requested_encoding[ssrc] = encoding
             logger.info(f"Sent separate OUTPUT_ENCODING command for SSRC {ssrc}: {encoding}")
         
         logger.info(f"Channel {ssrc} created and configured")
         return ssrc
     
-    def verify_channel(self, ssrc: int, expected_freq: Optional[float] = None) -> bool:
+    def verify_channel(self, ssrc: int, expected_freq: Optional[float] = None,
+                       expected_encoding: Optional[int] = None) -> bool:
         """
         Verify that a channel exists and is configured correctly
-        
+
         Args:
             ssrc: SSRC to verify
             expected_freq: Expected frequency in Hz (optional)
-        
+            expected_encoding: Expected output encoding (optional).  Defaults
+                to whatever was last requested for this SSRC via
+                :py:meth:`create_channel` or :py:meth:`set_output_encoding`.
+                Pass ``0`` to skip the check.
+
         Returns:
             True if channel exists and matches expectations
+
+        Note:
+            Encoding is checked because it is the one requested property
+            radiod can silently decline: it is sent as an unacknowledged
+            follow-up command, and some builds drop it on a later poll.
+            A channel that quietly serves S16 to a client expecting F32
+            keeps working -- at a fraction of the dynamic range, with the
+            loss showing up only as unexplained quantisation in the
+            science data (HamSCI/ka9q-python#3).  Checking frequency but
+            not encoding meant "verified" did not mean what it said.
         """
         # Discover current channels
         channels = discover_channels(self.status_address)
@@ -1479,7 +1512,23 @@ class RadiodControl:
             )
             return False
         
-        logger.info(f"Channel {ssrc} verified: {channel.frequency/1e6:.3f} MHz, {channel.preset}")
+        want_enc = (self._requested_encoding.get(ssrc)
+                    if expected_encoding is None else expected_encoding)
+        if want_enc:
+            got_enc = getattr(channel, "encoding", None)
+            if got_enc != want_enc:
+                logger.warning(
+                    f"Channel {ssrc} encoding mismatch: requested "
+                    f"{_encoding_name(want_enc)}, radiod is serving "
+                    f"{_encoding_name(got_enc)} -- the grant was not honored "
+                    f"or was lost (see HamSCI/ka9q-python#3)"
+                )
+                return False
+
+        logger.info(
+            f"Channel {ssrc} verified: {channel.frequency/1e6:.3f} MHz, {channel.preset}"
+            + (f", {_encoding_name(want_enc)}" if want_enc else "")
+        )
         return True
 
     def poll_channel(self, ssrc: int, expected_freq: Optional[float] = None,
@@ -1890,7 +1939,8 @@ class RadiodControl:
         logger.info(f"Removing channel SSRC {ssrc}")
         self.send_command(cmdbuffer)
 
-    def set_channel_lifetime(self, ssrc: int, lifetime: int):
+    def set_channel_lifetime(self, ssrc: int, lifetime: int,
+                             encoding: Optional[int] = None):
         """
         Set / refresh a channel's auto-destruct timer.
 
@@ -1910,11 +1960,30 @@ class RadiodControl:
                 destruct after that many frames; radiod will bump it up
                 to the configured idle-timeout floor (typically 1000
                 frames ≈ 20 s) when this poll is processed.
+            encoding: Output encoding to re-assert alongside the refresh.
+                Defaults to whatever was last requested for this SSRC via
+                :py:meth:`create_channel` or
+                :py:meth:`set_output_encoding`; pass explicitly when this
+                object did not create the channel.  Pass ``0`` to send no
+                encoding at all.
 
         Note:
             Older radiod builds without LIFETIME silently ignore the tag,
             so calling this against a pre-0f8b622 radiod is a no-op
             rather than an error.
+
+        Note:
+            The encoding is re-asserted because some radiod builds reset a
+            channel's output encoding to the preset default when they
+            process a LIFETIME-only command, turning the very keepalive
+            that keeps a channel alive into the thing that silently
+            downgrades it -- F32 for one interval, then S16 forever, with
+            nothing to notice (HamSCI/ka9q-python#3).  Re-sending it here
+            costs one extra TLV and makes the client correct regardless of
+            which radiod it is talking to, which matters because that is
+            not a version we control.  Verified not to reproduce on
+            ka9q-radio 14d780af (B4, 2026-08-07); the fix is deliberately
+            defensive rather than conditional on a version test.
         """
         _validate_ssrc(ssrc)
         if not isinstance(lifetime, int):
@@ -1924,14 +1993,24 @@ class RadiodControl:
         if lifetime < 0:
             raise ValidationError(f"lifetime must be >= 0; got {lifetime}")
 
+        enc = self._requested_encoding.get(ssrc) if encoding is None else encoding
+
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
         encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
         encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
         encode_int(cmdbuffer, StatusType.LIFETIME, lifetime)
+        if enc:
+            encode_int(cmdbuffer, StatusType.OUTPUT_ENCODING, enc)
         encode_eol(cmdbuffer)
 
-        logger.info(f"Setting LIFETIME for SSRC {ssrc} to {lifetime} frames")
+        if enc:
+            logger.info(
+                f"Setting LIFETIME for SSRC {ssrc} to {lifetime} frames "
+                f"(re-asserting encoding {enc})"
+            )
+        else:
+            logger.info(f"Setting LIFETIME for SSRC {ssrc} to {lifetime} frames")
         self.send_command(cmdbuffer)
 
     def _setup_status_listener(self):
@@ -2774,9 +2853,13 @@ class RadiodControl:
         
         Args:
             ssrc: SSRC of the channel
-            encoding: Encoding type (use Encoding constants from types.py)
-                     0=NO_ENCODING, 1=S16BE, 2=S16LE, 3=F32, 4=F16, 5=OPUS
-        
+            encoding: Encoding type (use Encoding constants from types.py):
+                     0=NO_ENCODING, 1=S16LE, 2=S16BE, 3=OPUS, 4=F32LE,
+                     5=AX25, 6=F16LE, 7=OPUS_VOIP, 8=F32BE, 9=F16BE,
+                     10=MULAW, 11=ALAW.  Always use the ``Encoding``
+                     constants rather than literals -- these values must
+                     match ka9q-radio's ``enum encoding`` in src/rtp.h.
+
         Example:
             >>> from ka9q.types import Encoding
             >>> control.set_output_encoding(ssrc=12345, encoding=Encoding.S16LE)
@@ -2792,6 +2875,7 @@ class RadiodControl:
         encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
         encode_eol(cmdbuffer)
         
+        self._requested_encoding[ssrc] = encoding
         logger.info(f"Setting output encoding for SSRC {ssrc}: {encoding}")
         self.send_command(cmdbuffer)
     
