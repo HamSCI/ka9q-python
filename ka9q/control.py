@@ -683,6 +683,11 @@ def decode_socket(data: bytes, length: int) -> dict:
         return {'family': 'unknown', 'address': '', 'port': 0}
 
 
+# SSRCs already warned about for TTL=0, so the warning fires once per
+# channel per process instead of once per poll.  See decode_status_dict().
+_TTL_ZERO_WARNED: set = set()
+
+
 def decode_status_dict(buffer: bytes) -> dict:
     """Decode a radiod STATUS packet into a flat dictionary.
 
@@ -776,11 +781,24 @@ def decode_status_dict(buffer: bytes) -> dict:
         elif type_val == StatusType.OUTPUT_TTL:
             status['ttl'] = decode_int(data, optlen)
             if status['ttl'] == 0:
-                logger.warning(
-                    f"Radiod reporting TTL=0 for SSRC "
-                    f"{status.get('ssrc', 'unknown')}: Multicast data "
-                    f"restricted to localhost loopback only!"
-                )
+                # Warn ONCE per SSRC, not once per poll.  TTL=0 is a static
+                # property of the channel, but every client re-reads status
+                # for every SSRC on every poll -- on a 36-channel single-host
+                # station that was hundreds of identical WARNING lines per
+                # minute in psk-recorder and wspr-recorder, which is enough
+                # to bury the decode/anchor diagnostics an operator actually
+                # needs.  (It is also the *intended* config there: sigmond
+                # generates radiod with ttl=0 as the safe single-host
+                # default.  This library can't know the deployment intent,
+                # so the warning stays -- it just stops repeating.)
+                ssrc = status.get('ssrc', 'unknown')
+                msg = (f"Radiod reporting TTL=0 for SSRC {ssrc}: "
+                       f"Multicast data restricted to localhost loopback only!")
+                if ssrc in _TTL_ZERO_WARNED:
+                    logger.debug(msg)
+                else:
+                    _TTL_ZERO_WARNED.add(ssrc)
+                    logger.warning(msg)
         elif type_val == StatusType.LIFETIME:
             status['lifetime'] = decode_int(data, optlen)
         elif type_val == StatusType.DESCRIPTION:
