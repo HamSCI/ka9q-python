@@ -43,6 +43,7 @@ Architectural notes
 from __future__ import annotations
 
 import logging
+import time as _time_mod
 import select
 import socket
 import struct
@@ -409,6 +410,61 @@ class StatusListener:
         # readers, but ``rtp_to_wallclock`` and other transactional
         # consumers go through ``get_anchor`` to dodge the torn-read
         # window entirely.
+        # ---- anchor-pair self-consistency audit (hf-timestd#7) ----
+        # Every sub-second timestamp downstream -- rtp_to_utc, the BPSK
+        # chain delay, the chrony SHM reference time -- rests on this
+        # (gps_time, rtp_timesnap) pair.  Nothing has ever checked that
+        # consecutive pairs describe the SAME clock relationship.
+        #
+        # They must: the ADC is GPSDO-disciplined, so advancing
+        # rtp_timesnap by n samples must advance gps_time by n/sample_rate
+        # seconds, to within GPSDO drift (parts in 1e11 -- nanoseconds
+        # over this cadence).  Predict the new gps_time from the previous
+        # pair and report the disagreement.
+        #
+        # Motivation: AC0G-B4 2026-08-08 shows an 80.000 ms chain-delay
+        # step -- exactly 4 radiod blocks of 20 ms.  Not in the RF (the
+        # correlation surface is a single clean triangle to +-250 ms),
+        # not in the matched filter (0.12 us repeatable), not in sample
+        # labelling (drift bounded, non-accumulating).  This pair is what
+        # is left.  If consecutive pairs disagree in whole blocks, this
+        # audit shows it.
+        try:
+            _sr = int(getattr(ci, 'sample_rate', 0) or 0)
+            _aud = getattr(self, '_anchor_audit', None)
+            if _aud is None:
+                _aud = self._anchor_audit = {
+                    'prev': {}, 'n': 0, 'hist': {}, 'max_ns': 0, 'last_log': 0.0,
+                }
+            _prev = _aud['prev'].get(ssrc)
+            if _prev is not None and _sr:
+                _pg, _ps = _prev
+                _dsnap = (int(rtp_timesnap) - int(_ps)) & 0xFFFFFFFF
+                if _dsnap >= (1 << 31):
+                    _dsnap -= (1 << 32)
+                _implied = int(_pg) + int(round(_dsnap * 1e9 / _sr))
+                _delta = int(gps_time) - _implied
+                _aud['n'] += 1
+                if abs(_delta) > abs(_aud['max_ns']):
+                    _aud['max_ns'] = _delta
+                # Bucket by whole milliseconds; a 20 ms-quantised pattern
+                # is the signature we are testing for.
+                _ms = int(round(_delta / 1e6))
+                _aud['hist'][_ms] = _aud['hist'].get(_ms, 0) + 1
+                _now = _time_mod.monotonic()
+                if (_now - _aud['last_log']) > 60.0:
+                    _aud['last_log'] = _now
+                    _top = sorted(_aud['hist'].items(),
+                                  key=lambda kv: -kv[1])[:8]
+                    logger.warning(
+                        "ANCHOR PAIR AUDIT: updates=%d max_disagreement=%+d ns "
+                        "(%+.3f ms) | delta_ms histogram=%s",
+                        _aud['n'], _aud['max_ns'], _aud['max_ns'] / 1e6, _top,
+                    )
+            _aud['prev'][ssrc] = (int(gps_time), int(rtp_timesnap))
+        except Exception:
+            pass
+        # ---- end anchor-pair audit ----
         ci.update_anchor(gps_time, rtp_timesnap)
 
         # Opportunistic refresh of encoding (radiod can grant a different
