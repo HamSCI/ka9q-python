@@ -110,6 +110,9 @@ class PacketResequencer:
         
         # Circular buffer: sequence_num -> packet
         self.buffer: deque = deque(maxlen=buffer_size)
+        # RTP timestamp of the first sample of the most recent emitted
+        # chunk (None until the first emission).  See _try_output.
+        self.last_chunk_rtp_start = None
         self.buffer_seq_nums: set = set()
         
         # State tracking
@@ -183,6 +186,13 @@ class PacketResequencer:
         """Try to output next packet(s) in sequence"""
         output_samples = []
         gap_events = []
+        # True RTP timestamp of the first sample this call will emit (gap
+        # fills included: a fill starts exactly at next_expected_ts).
+        # Published via last_chunk_rtp_start so consumers can label the
+        # RESEQUENCED stream truthfully — labelling with the last RECEIVED
+        # packet's header desynchronizes labels from delivered samples
+        # under loss (hf-timestd T6 origin slips, 2026-08-11).
+        chunk_start_ts = self.next_expected_ts
         
         while True:
             # Look for next expected sequence number
@@ -231,6 +241,7 @@ class PacketResequencer:
             combined = np.concatenate(output_samples)
             self.stats.samples_output += len(combined)
             self.cumulative_samples += len(combined)
+            self.last_chunk_rtp_start = chunk_start_ts & 0xFFFFFFFF
             return combined, gap_events
         
         return None, []

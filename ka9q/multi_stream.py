@@ -80,6 +80,7 @@ class _ChannelSlot:
     sample_buffer: List[np.ndarray] = field(default_factory=list)
     gap_buffer: List[GapEvent] = field(default_factory=list)
     packets_since_delivery: int = 0
+    pending_rtp_start: object = None   # first-sample RTP of the pending batch
     deliver_interval: int = 10
     last_packet_time: float = 0.0
     dropped: bool = False
@@ -502,6 +503,8 @@ class MultiStream:
             output, gaps = slot.resequencer.process_packet(packet)
 
             if output is not None and len(output) > 0:
+                if not slot.sample_buffer:
+                    slot.pending_rtp_start = slot.resequencer.last_chunk_rtp_start
                 slot.sample_buffer.append(output)
                 slot.gap_buffer.extend(gaps)
                 slot.packets_since_delivery += 1
@@ -597,6 +600,7 @@ class MultiStream:
             slot.sample_buffer.clear()
             slot.gap_buffer.clear()
             slot.packets_since_delivery = 0
+            slot.pending_rtp_start = None
             return
 
         combined = np.concatenate(slot.sample_buffer)
@@ -606,6 +610,7 @@ class MultiStream:
         slot.quality.batch_samples_delivered = n
         slot.quality.batch_gaps = list(slot.gap_buffer)
         slot.quality.sample_rate = slot.sample_rate
+        slot.quality.delivered_rtp_start = slot.pending_rtp_start
 
         try:
             slot.on_samples(combined, slot.quality)
@@ -617,6 +622,7 @@ class MultiStream:
         slot.sample_buffer.clear()
         slot.gap_buffer.clear()
         slot.packets_since_delivery = 0
+        slot.pending_rtp_start = None
 
     # ── health monitor ──
 

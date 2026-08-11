@@ -224,6 +224,12 @@ ka9q-python's "actors" are its consumers and the protocol it tracks:
   concurrent long-running use.
 - `KQP-Q-003` `[CODE]` ✅ Receive sockets SHALL set **`SO_RCVBUF` = 64 MB** on
   both `RadiodStream` and `MultiStream` to resist GIL-stall packet loss.
+- `KQP-Q-010` `[CODE]` ✅ Every delivered sample batch SHALL carry the true
+  RTP timestamp of its FIRST sample (`StreamQuality.delivered_rtp_start`,
+  gap fills included), computed from the resequencer's emission tracking.
+  Consumers labelling samples SHALL prefer it over `last_rtp_timestamp`
+  (the last RECEIVED packet's header), which desynchronizes from the
+  delivered stream under loss. (2026-08-11; hf-timestd T6 origin slips.)
 - `KQP-Q-004` `[CODE]` ✅ `ManagedStream` SHALL recover automatically from
   radiod restart and network interruption without consumer intervention.
 - `KQP-Q-005` `[DOC]` ✅ Protocol definitions SHALL be **provably in sync** with

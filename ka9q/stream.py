@@ -292,6 +292,7 @@ class RadiodStream:
         # Sample accumulator for batched delivery
         self._sample_buffer: List[np.ndarray] = []
         self._gap_buffer: List[GapEvent] = []
+        self._pending_rtp_start = None
         self._packets_since_delivery = 0
         
         # Socket and threading
@@ -602,6 +603,10 @@ class RadiodStream:
         
         # Accumulate output
         if output_samples is not None:
+            if not self._sample_buffer:
+                # First chunk of the batch: its true first-sample RTP
+                # labels the whole delivered batch.
+                self._pending_rtp_start = self.resequencer.last_chunk_rtp_start
             self._sample_buffer.append(output_samples)
             self._gap_buffer.extend(gap_events)
             self._packets_since_delivery += 1
@@ -651,6 +656,7 @@ class RadiodStream:
         # Update quality for this batch
         batch_start = self.quality.total_samples_delivered
         self.quality.batch_start_sample = batch_start
+        self.quality.delivered_rtp_start = self._pending_rtp_start
         self.quality.batch_samples_delivered = len(samples)
         self.quality.batch_gaps = gaps
         self.quality.total_samples_delivered += len(samples)
@@ -670,6 +676,7 @@ class RadiodStream:
         self._sample_buffer = []
         self._gap_buffer = []
         self._packets_since_delivery = 0
+        self._pending_rtp_start = None
         
         # Deliver to callback
         if self.on_samples:

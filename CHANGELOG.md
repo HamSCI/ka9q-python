@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.21.0 (2026-08-11)
+
+- **`StreamQuality.delivered_rtp_start`** — the true RTP timestamp of the
+  FIRST sample of each delivered batch, from the resequencer's emission
+  tracking (`PacketResequencer.last_chunk_rtp_start`; zero fills
+  included).  Both `RadiodStream` and `MultiStream` populate it.
+  Consumers that label samples MUST prefer this over
+  `last_rtp_timestamp`: the latter is the last RECEIVED packet's header
+  (pre-resequencer) and desynchronizes from delivered samples under
+  loss — steady-state ±1-packet label wobble, and block-scale label
+  slips during stall-and-catchup (root cause of hf-timestd's T6 origin
+  instability; see hf-timestd docs/T6-BLOCK-SLIP-ROOT-CAUSE-2026-08-10).
+  `None` when nothing has been delivered yet.
+
 ## [3.20.0] - 2026-06-29
 
 ### Added — `SlotClock` ambiguous-unwrap guard (fail loud, never silent)

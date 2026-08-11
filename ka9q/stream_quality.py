@@ -140,6 +140,15 @@ class StreamQuality:
     """RTP timestamp of first packet received"""
     
     last_rtp_timestamp: int = 0
+    
+    # RTP timestamp of the FIRST sample of the delivered batch, from the
+    # resequencer's emission tracking (gap fills included) — the truthful
+    # label for the resequenced stream.  None when the producer predates
+    # this field or nothing has been delivered.  Prefer this over
+    # last_rtp_timestamp for sample labelling: the latter is the last
+    # RECEIVED packet's header and desynchronizes from delivered samples
+    # under loss.
+    delivered_rtp_start: object = None
     """RTP timestamp of most recent packet"""
     
     sample_rate: int = 0
