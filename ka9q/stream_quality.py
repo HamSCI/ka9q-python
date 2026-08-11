@@ -201,24 +201,13 @@ class StreamQuality:
         }
     
     def copy(self) -> 'StreamQuality':
-        """Create a copy (for passing to callbacks without mutation issues)"""
-        return StreamQuality(
-            batch_start_sample=self.batch_start_sample,
-            batch_samples_delivered=self.batch_samples_delivered,
-            batch_gaps=list(self.batch_gaps),
-            total_samples_delivered=self.total_samples_delivered,
-            total_samples_expected=self.total_samples_expected,
-            total_gaps_filled=self.total_gaps_filled,
-            total_gap_events=self.total_gap_events,
-            rtp_packets_received=self.rtp_packets_received,
-            rtp_packets_expected=self.rtp_packets_expected,
-            rtp_packets_lost=self.rtp_packets_lost,
-            rtp_packets_late=self.rtp_packets_late,
-            rtp_packets_duplicate=self.rtp_packets_duplicate,
-            rtp_packets_resequenced=self.rtp_packets_resequenced,
-            stream_start_utc=self.stream_start_utc,
-            last_packet_utc=self.last_packet_utc,
-            first_rtp_timestamp=self.first_rtp_timestamp,
-            last_rtp_timestamp=self.last_rtp_timestamp,
-            sample_rate=self.sample_rate,
-        )
+        """Create a copy (for passing to callbacks without mutation issues).
+
+        Implemented with dataclasses.replace so EVERY field is carried —
+        the previous hand-maintained field list silently dropped newly
+        added fields (delivered_rtp_start arrived as None in every
+        RadiodStream callback, 2026-08-11).  batch_gaps gets a fresh
+        list so callback holders never see later mutation.
+        """
+        import dataclasses
+        return dataclasses.replace(self, batch_gaps=list(self.batch_gaps))

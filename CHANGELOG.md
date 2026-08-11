@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.21.1 (2026-08-11)
+
+- **Fix: `StreamQuality.copy()` dropped `delivered_rtp_start`** — the
+  hand-maintained field list predated the new field, so every
+  RadiodStream callback received `None` (MultiStream, which passes its
+  quality object directly, was unaffected). `copy()` now uses
+  `dataclasses.replace`, carrying every present and future field; a
+  fields-iteration regression test guards the class.
+
 ## 3.21.0 (2026-08-11)
 
 - **`StreamQuality.delivered_rtp_start`** — the true RTP timestamp of the

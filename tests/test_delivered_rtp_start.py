@@ -100,3 +100,21 @@ class TestMultiStreamDeliveredLabel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQualityCopyCarriesEverything(unittest.TestCase):
+    def test_copy_carries_delivered_rtp_start(self):
+        from ka9q.stream_quality import StreamQuality
+        q = StreamQuality()
+        q.delivered_rtp_start = 424242
+        self.assertEqual(q.copy().delivered_rtp_start, 424242)
+
+    def test_copy_carries_every_field(self):
+        # Guard the whole class: copy() must never drop a field again.
+        import dataclasses
+        from ka9q.stream_quality import StreamQuality
+        q = StreamQuality()
+        c = q.copy()
+        for f in dataclasses.fields(StreamQuality):
+            self.assertEqual(getattr(c, f.name), getattr(q, f.name),
+                             f"copy() dropped field {f.name}")
