@@ -36,7 +36,7 @@ emergency fix for a live bug; it's the normal Task 4/9 capability-exposure
 step this project's process expects before a pin with a flagged enum
 change advances.
 
-**Findings:** 22 total — **1 P0, 9 P1, 4 P2, 8 P3**. The P0 (`F1`) is
+**Findings:** 23 total — **1 P0, 9 P1, 4 P2, 9 P3**. The P0 (`F1`) is
 `MultiStream`'s restore path silently changing a channel's SSRC identity
 on recovery when a channel has non-default gain/AGC — the shared
 recovery substrate every major sigmond client depends on. Several P1s are

@@ -22,7 +22,7 @@ Several findings straddle categories (mechanically-triggered gates with no
 live usage; environment-dependent breakage). Where that's true, the entry
 says so explicitly rather than forcing a clean bucket.
 
-**Counts:** P0 = 1, P1 = 9, P2 = 4, P3 = 8. **Total = 22.**
+**Counts:** P0 = 1, P1 = 9, P2 = 4, P3 = 9. **Total = 23.**
 
 ---
 
@@ -52,6 +52,7 @@ says so explicitly rather than forcing a clean bucket.
 | F20 | P3 | hf-timestd hand-rolls an RTP-only multicast join instead of using `RadiodStream` |
 | F21 | P3 | Two dead `ka9q` imports in hf-timestd |
 | F22 | P3 | Resequencer cross-run delivery consistency (Q5) remains unresolved needs-empirical |
+| F23 | P3 | CLAUDE.md's client roster and default test host have drifted from the audited ground truth |
 
 ---
 
@@ -569,6 +570,28 @@ task, if bounding this divergence matters for any current consumer (e.g.
 hf-timestd's dual-anchor T5/T6 cross-checks, which the report calls out as
 the scenario where it would matter most).
 
+### F23 — CLAUDE.md's client roster and default test host have drifted from the audited ground truth
+
+**Claim:** `CLAUDE.md`'s client roster names 5 repos (psk-recorder,
+wspr-recorder, hfdl-recorder, codar-sounder + a coordination list), but
+`clients.md`'s no-bypass sweep establishes the true radiod-client roster
+as 9 repos (adding meteor-scatter, hf-tec, superdarn-sounder, and
+sigmond, all confirmed importing `ka9q` and talking to radiod). Separately,
+`CLAUDE.md` states the default integration-test radiod host is
+`bee1-hf-status.local`, but `tests/conftest.py`'s actual default (both the
+`--radiod-host` CLI option default and the `RADIOD_HOST` env-var fallback,
+`conftest.py:14,29`) is `bee1-status.local` — a different hostname, not a
+typo-level difference.
+
+**Evidence:** `clients.md` § Step 3 "Headline correction to the brief's
+'zero `ka9q` imports' premise" and § "Confirmed bypass list" (9-repo
+roster: hf-timestd, wspr-recorder, psk-recorder, meteor-scatter,
+hfdl-recorder, codar-sounder, hf-tec, superdarn-sounder, sigmond);
+`tests/conftest.py:14,29` (actual default host).
+
+**Remediation:** Correct roster + hostname; planned as Task 10 of the
+alignment plan.
+
 ---
 
 ## Consolidation notes (relative to the five source reports)
@@ -589,6 +612,16 @@ the scenario where it would matter most).
   recovery equivalence) from `idempotency.md` are **not** listed as
   findings — both were verified-by-code and then verified live in Task 7
   with no defect found. They are closed, not open items.
+- The Task 2 → Task 6 sign-extension cross-check is likewise **not** listed
+  as a finding: Task 2 flagged upstream's `encode_int()` sign-extension bug
+  class (commits `f825316f`/`fc7afa01`/`ce4fcdd9`, C's plain-`int` encoder
+  widening a bit-31-set SSRC to 8 bytes) and asked Task 6 to check
+  ka9q-python's own encoder for the same pattern. Task 6 verified it
+  **clean** — `ka9q/control.py`'s `encode_int` is an arbitrary-precision,
+  negative-rejecting encoder with no implicit-widening step for the bug to
+  occur in, confirmed numerically for the bit-31-set case (`idempotency.md`
+  § "`encode_int` sign-extension cross-reference"). Recorded here so the
+  cross-check's pass result isn't mistaken for an unaddressed action item.
 - The `731ce5e` keepalive-encoding fix itself (already committed prior to
   this audit) is likewise not listed — Task 7's Probe 2b Phase B confirmed
   it works as designed; only its *sibling* gap in `tune()` (F4) and in
