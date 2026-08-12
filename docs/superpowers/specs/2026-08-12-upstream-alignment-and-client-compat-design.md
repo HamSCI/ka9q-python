@@ -19,10 +19,12 @@ ka9q-python for two guarantees that have never been audited end-to-end:
    preserving settings.
 
 ka9q-python is the **mandatory control path**: any client requiring a feed
-from an RX888 goes through ka9q-python to control radiod. There is no
-side-channel. Alignment therefore means more than covering current client
-usage — the full radiod control surface must be reachable through
-`RadiodControl`, or future clients will be blocked.
+from an RX888 goes through ka9q-python to control radiod. No client may
+talk to radiod directly — not via its own control socket, hand-built TLV
+packets, or ka9q-radio CLI binaries. Alignment therefore means more than
+covering current client usage — the full radiod control surface must be
+reachable through `RadiodControl`, or future clients will be forced to
+bypass, and bypasses are policy violations.
 
 Known drift already found during scoping:
 
@@ -88,6 +90,16 @@ psk-recorder, meteor-scatter): every imported `ka9q` symbol, how it is
 called, which behaviors are load-bearing (payload format, timing,
 `StatusType`/`Encoding` value reliance), plus all reaches into non-public
 internals.
+
+**Bypass detection** (policy: no client talks to radiod directly): scan
+all sigmond-suite repos — including those with no `ka9q` import, notably
+hfdl-recorder and codar-sounder — for direct radiod communication: raw
+control-socket UDP, hand-built TLV encoding (hf-timestd's use of
+`ka9q.control.encode_int`/`CMD` is a known near-bypass), or invocation of
+ka9q-radio CLI binaries (`tune`, `control`, `pcmrecord`, `metadump`, …).
+Each bypass is a finding recording *what capability gap motivated it*, so
+remediation can close the gap in ka9q-python and the client can be
+migrated.
 
 ### 1c. Idempotency audit
 
