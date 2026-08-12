@@ -49,4 +49,4 @@ rubric. Zero confirmed no-bypass violations exist among sigmond-authored
 Python clients (`clients.md`); the one bypass found (`ka9q-web`, vendored
 third-party C) is a policy-scope question, not a ka9q-python code fix.
 
-**Artifact:** (URL added after publication)
+**Artifact:** https://claude.ai/code/artifact/13cb509f-9248-49ed-bb05-0be0354d4361
