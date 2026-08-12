@@ -68,7 +68,7 @@ production contract) except where noted inline.
 | `src/hf_timestd/core/core_recorder_v2.py:52` | `Encoding` | dict of `S16BE/S16LE/F32/F32LE/F32BE/F16/F16LE/F16BE/OPUS/NO_ENCODING` (10 of 13 members — the broadest `Encoding` surface in the repo) → `ensure_channel(encoding=...)`, default `Encoding.F32` | same wire-value stability requirement as `channel_manager.py`, at greater breadth |
 | `src/hf_timestd/core/core_recorder_v2.py:52,1364` | `MultiStream` | one shared socket via `MultiStream(control=..., samples_per_packet=200, resequence_buffer_size=128)`; `recorder.register_with(self._multi)` → `multi.add_channel(...)` | `add_channel` must be idempotent for an already-provisioned SSRC (comment: "re-runs `ensure_channel` internally... cheap status probe"); "add-before-start" ordering is relied on; `on_stream_dropped`/`on_stream_restored` forwarded through — comments reference `MultiStream._handle_drop`/`_attempt_restore` internal method names directly, i.e. the client team has read ka9q-python internals to reason about behavior even though only the public `add_channel` is called |
 | `src/hf_timestd/core/core_recorder_v2.py:1443,1552` | `RadiodStream` | two dedicated (non-`MultiStream`) instances for T6 BPSK-PPS calibration and WWVB_60, own socket/thread to avoid archive-flush blocking | `resequence_buffer_size=256` was deliberately widened from the 128 default ("gave 0.8s tolerance... too tight") — a change to `PacketResequencer`'s half-full-buffer-declares-loss heuristic invalidates this tuning and risks reintroducing a documented BPSK Costas-loop unlock bug |
-| `src/hf_timestd/core/core_recorder_v2.py:2388,2433,2557,2773,3034,4064` (8 sites, via `ka9q.rtp_recorder`) | `rtp_to_wallclock` | `rtp_to_wallclock(rtp_timestamp, channel_info) -> Optional[float]` for chain-delay calibration / T5-T6 cross-checks / offset computation | this is a **deprecated alias** (`ka9q/rtp_recorder.py:246`: `rtp_to_wallclock = rtp_to_utc`, renamed 2026-06-27, no `DeprecationWarning` emitted) — depends on (a) the alias continuing to exist, (b) the GPS-epoch↔Unix math + 32-bit RTP-wraparound disambiguation staying bit-identical, (c) returning `None` (not raising) on a missing anchor — every call site wraps in `try/except`, so a signature break would be caught, but silent numeric drift in the formula would not |
+| `src/hf_timestd/core/core_recorder_v2.py:2388,2433,2557,2773,3034,4064` (8 sites, via `ka9q.rtp_recorder`) | `rtp_to_wallclock` | `rtp_to_wallclock(rtp_timestamp, channel_info) -> Optional[float]` for chain-delay calibration / T5-T6 cross-checks / offset computation | this is a **deprecated alias** (`ka9q/rtp_recorder.py:247`: `rtp_to_wallclock = rtp_to_utc`, renamed 2026-06-27, no `DeprecationWarning` emitted) — depends on (a) the alias continuing to exist, (b) the GPS-epoch↔Unix math + 32-bit RTP-wraparound disambiguation staying bit-identical, (c) returning `None` (not raising) on a missing anchor — every call site wraps in `try/except`, so a signature break would be caught, but silent numeric drift in the formula would not |
 | `src/hf_timestd/stream/stream_manager.py:15` | `discover_channels`, `RadiodControl`, `ChannelInfo` | wraps ka9q calls behind hf-timestd's own SSRC-hiding `StreamManager`/`StreamHandle`; `.ensure_channel(...)`, `.remove_channel(ssrc)` | `ensure_channel` must return `.ssrc`/`.multicast_address`/`.port`; `remove_channel(ssrc)` must not raise on an already-removed SSRC |
 | `scripts/*.py` (9 CLI/debug tools: `verify_ensure_behavior`, `verify_channel_count`, `inspect_channels[_full]`, `cleanup_channels`/`cleanup_all`, `check_channels`, `list_radiod_channels`, `monitor_radiod_health`, `wwvb_live_tap`, `test_real_data_pipeline`) | `RadiodControl`, `discover_channels`, `ChannelInfo`, `Encoding`, `RadiodStream` | ad-hoc operator tooling — same shape dependencies as above, lower stakes (not the production data path) | grouped as one row per the brief's dedup guidance |
 
@@ -155,7 +155,7 @@ repo's own remediation.
   it's used across all four clients: `Optional[float]` Unix-epoch
   seconds, never a `datetime`, `None` on missing timing info,
   side-effect-free. `rtp_to_wallclock` is a deprecated alias for
-  `rtp_to_utc` (`ka9q/rtp_recorder.py:246`, renamed 2026-06-27, no
+  `rtp_to_utc` (`ka9q/rtp_recorder.py:247`, renamed 2026-06-27, no
   `DeprecationWarning`) — hf-timestd and wspr-recorder both still use
   the old name exclusively; psk-recorder/meteor-scatter already use the
   new name. A signature or return-type change here silently breaks
@@ -214,17 +214,33 @@ module.
    **This reach is unnecessary and not motivated by a genuine capability
    gap.** `ka9q/control.py:1209` already defines a public
    `RadiodControl.set_filter(self, ssrc, low_edge=None, high_edge=None,
-   kaiser_beta=None)` — verified by reading it directly — that builds
-   byte-for-byte the identical TLV sequence
-   (`CMD` → `encode_double(LOW_EDGE)` → `encode_double(HIGH_EDGE)` →
-   `encode_int(OUTPUT_SSRC)` → `encode_int(COMMAND_TAG)` →
-   `encode_eol()` → `self.send_command(cmdbuffer)`). hf-timestd's
-   `_set_filter_edges` reimplements this by hand instead of calling
+   kaiser_beta=None)` — verified by reading it directly — that encodes
+   the **identical set of TLV fields**, but not in the identical byte
+   order: hf-timestd's `_set_filter_edges`
+   (`stream_recorder_v2.py:884-911`) emits
+   `CMD` → `OUTPUT_SSRC` → `COMMAND_TAG` → `LOW_EDGE` → `HIGH_EDGE` →
+   `EOL`, while `set_filter()` (`control.py:1220-1235`) emits
+   `CMD` → `LOW_EDGE` → `HIGH_EDGE` → `KAISER_BETA` → `OUTPUT_SSRC` →
+   `COMMAND_TAG` → `EOL` — a different field order, and `set_filter()`
+   additionally supports `KAISER_BETA` (a third parameter
+   `_set_filter_edges` never sends). The two are **not** byte-for-byte
+   identical wire output. They are semantically equivalent for the
+   `low_edge`/`high_edge` fields both send: radiod's TLV decoder is a
+   linear scan keyed by type tag, not a fixed-offset struct, so field
+   order within one command packet does not affect how radiod
+   interprets it — order-independence here is a property of the TLV
+   decode loop (`decode_radio_commands`, confirmed structurally in
+   `docs/audit/2026-08-12-alignment/control-surface.md`), not
+   something re-verified byte-for-byte in this task. hf-timestd's
+   `_set_filter_edges` reimplements the `LOW_EDGE`/`HIGH_EDGE` half of
+   `set_filter()`'s TLV set by hand instead of calling
    `self._control.set_filter(ssrc, low_edge=low, high_edge=high)`. This
    looks like a reimplementation predating `set_filter`'s addition (or
    simply not noticed), not a case where ka9q-python lacked the
    capability. **Public API that already replaces it:**
-   `RadiodControl.set_filter()`.
+   `RadiodControl.set_filter()` (note: adopting it would also make
+   `KAISER_BETA` available to hf-timestd for free, which
+   `_set_filter_edges` currently has no path to set at all).
 
 2. **`resolve_multicast_address`** — from `ka9q.utils`, imported inline
    at `src/hf_timestd/core/core_recorder_v2.py:196`, inside
@@ -590,11 +606,13 @@ items for this task:
    ka9q-python, not a policy violation by any sigmond-authored client.
 3. **hf-timestd's only true "internals reach" (`ka9q.control`'s raw TLV
    encoders) turned out to be unmotivated by any actual capability
-   gap** — `RadiodControl.set_filter()` already does exactly what the
-   hand-rolled code does, byte for byte. This cuts against the
-   assumption (reasonable going in) that internals reaches are usually
-   evidence of a missing public API; here it's evidence of a
-   reimplementation nobody migrated off of.
+   gap** — `RadiodControl.set_filter()` already sends the same
+   `LOW_EDGE`/`HIGH_EDGE` fields the hand-rolled code does (in a
+   different TLV field order, which doesn't matter to radiod's decoder,
+   plus a `KAISER_BETA` field hf-timestd never sends at all). This cuts
+   against the assumption (reasonable going in) that internals reaches
+   are usually evidence of a missing public API; here it's evidence of
+   a reimplementation nobody migrated off of.
 4. **A previously undocumented, minor capability gap**:
    `ka9q.utils.resolve_multicast_address` is a legitimate public
    utility (raise-on-unreachable address probe) that simply never got
