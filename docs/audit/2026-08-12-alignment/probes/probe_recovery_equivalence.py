@@ -37,6 +37,21 @@ running):
 
 2. `ManagedStream.stop()` returns `ManagedStreamStats`, not `None` --
    used only for its side effect here, matching the brief.
+
+Round 2 adaptations (see idempotency.md "Empirical results — Round 2"):
+- Both `RadiodControl` instances need `interface=LAN_IP` (this sandbox's
+  239.0.0.0/8 route is `dev lo`; without an explicit interface, outbound
+  control commands never leave the host).
+- `ManagedStream` needs `destination=WORKING_DESTINATION` -- radiod on
+  this host silently ignores a create whose destination is omitted or is
+  a multicast address it isn't already using; a destination matching an
+  existing channel's output group works reproducibly (confirmed via a
+  controlled A/B test, see idempotency.md). `RadiodStream`'s own RTP
+  receive path (`ka9q/stream.py`) needs no interface override -- it
+  already joins the data multicast group on every local IPv4 interface
+  via `join_multicast_all_interfaces` (stream.py ~421-457), so once the
+  control path succeeds in creating the channel, sample reception works
+  without further changes.
 """
 import sys
 import time
@@ -44,6 +59,8 @@ from ka9q import RadiodControl
 from ka9q.managed_stream import ManagedStream
 
 HOST = "bee1-status.local"
+LAN_IP = "192.168.1.176"
+WORKING_DESTINATION = "239.139.172.41"
 FREQ = 7_040_000.0 + 900_003  # 7.040903 MHz -- synthetic test frequency
 FIELDS = ("frequency", "sample_rate", "preset", "encoding")
 
@@ -52,12 +69,13 @@ def snap(info):
     return {f: getattr(info, f, None) for f in FIELDS}
 
 
-c = RadiodControl(HOST)
-saboteur = RadiodControl(HOST)
+c = RadiodControl(HOST, interface=LAN_IP)
+saboteur = RadiodControl(HOST, interface=LAN_IP)
 stream = None
 actual_ssrc = None
 try:
     stream = ManagedStream(c, FREQ, preset="usb", sample_rate=12000,
+                            destination=WORKING_DESTINATION,
                             on_samples=lambda *a, **k: None)
     started = stream.start()
     actual_ssrc = started.ssrc

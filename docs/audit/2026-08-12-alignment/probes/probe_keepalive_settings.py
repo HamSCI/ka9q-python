@@ -26,17 +26,24 @@ Q4: the VERIFIED-BY-CODE verdict is specifically about
 probe does not call `set_channel_lifetime` and is not a direct empirical
 test of that code path -- it is the closest black-box analog buildable
 from the brief's given probe shape.
+
+Round 2 adaptations: `interface=` and `destination=` required — see
+probe_create_twice.py's docstring and idempotency.md "Empirical results
+— Round 2" for the full explanation.
 """
 import sys
 import time
 from ka9q import RadiodControl, Encoding
 
 HOST, SSRC, FREQ = "bee1-status.local", 3999900002, 7_040_000.0
+LAN_IP = "192.168.1.176"
+WORKING_DESTINATION = "239.139.172.41"
 
-c = RadiodControl(HOST)
+c = RadiodControl(HOST, interface=LAN_IP)
 try:
     c.create_channel(FREQ, preset="usb", sample_rate=12000, ssrc=SSRC,
-                      encoding=Encoding.F32LE, lifetime=20)
+                      encoding=Encoding.F32LE, lifetime=20,
+                      destination=WORKING_DESTINATION)
     before = c.poll_channel(SSRC, expected_freq=FREQ, timeout=5.0)
     time.sleep(30)  # > one keepalive interval for lifetime=20
     after = c.poll_channel(SSRC, expected_freq=FREQ, timeout=5.0)

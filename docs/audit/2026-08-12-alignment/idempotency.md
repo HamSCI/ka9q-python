@@ -416,23 +416,31 @@ wire, not a maintenance path that partially forgets what it once sent).
 
 ---
 
-## Empirical results (Task 7)
+## Empirical results (Task 7) — Round 1 (blocked at write path, superseded)
 
-**Status: BLOCKED at the write path.** Both permitted hosts
-(`bee1-status.local`, `bee2-status.local`) are read-reachable — live
-STATUS multicast from real, already-running radiod channels arrives
-normally and `discover_channels()`/`poll_channel()` decode it correctly —
-but every outbound control command sent from this sandbox
-(`create_channel`, `remove_channel`, and `ensure_channel`'s internal
-create, exercised via `ManagedStream.start()`) silently fails to reach
-either radiod. This is an environment-level networking fact of the
-sandbox this task ran in, not a finding about ka9q-python or radiod
-itself, and it blocks all four probes below from producing usable
-pass/fail evidence for Task 6's verdicts. Full diagnosis, all four
-probes' real (negative) output, and the leftover-check are recorded
-below per the "do NOT fake results" rule — none of the exit
-codes/CONVERGES/PRESERVED strings below should be read as validating or
-refuting Task 6 without the caveat in every subsection.
+**Status: BLOCKED at the write path in Round 1 — unblocked in Round 2,
+see the "Round 2" section after this one for the real pass/fail
+evidence.** This Round-1 section is kept in full because its root-cause
+diagnosis (the `239.0.0.0/8 dev lo` routing entry) is exactly what
+Round 2 fixed with `RadiodControl(..., interface=...)`, and because
+Round 1's negative results are still the correct record of what a naive
+first attempt produces on a sandbox configured this way.
+
+Both permitted hosts (`bee1-status.local`, `bee2-status.local`) were
+read-reachable in Round 1 — live STATUS multicast from real,
+already-running radiod channels arrived normally and
+`discover_channels()`/`poll_channel()` decoded it correctly — but every
+outbound control command sent from this sandbox (`create_channel`,
+`remove_channel`, and `ensure_channel`'s internal create, exercised via
+`ManagedStream.start()`) silently failed to reach either radiod. This
+was an environment-level networking fact of the sandbox this task ran
+in, not a finding about ka9q-python or radiod itself, and it blocked all
+four Round-1 probes below from producing usable pass/fail evidence for
+Task 6's verdicts. Full diagnosis, all four probes' real (negative)
+output, and the leftover-check are recorded below per the "do NOT fake
+results" rule — none of the exit codes/CONVERGES/PRESERVED strings below
+should be read as validating or refuting Task 6 without the caveat in
+every subsection (Round 2 supersedes this for actual evidence).
 
 ### Root cause (confirmed, not just suspected)
 
@@ -625,3 +633,342 @@ this session's environment) — verify with `ip route get <resolved
 status-group-IP>` before running probes, not just a reachability
 ping/discover check, since discovery alone cannot distinguish a working
 write path from a one-way read-only relay.
+
+---
+
+## Empirical results (Task 7) — Round 2 (unblocked)
+
+**Status: UNBLOCKED and DONE.** `RadiodControl` already supports
+multihomed hosts via a documented `interface: Optional[str]` constructor
+argument (control.py:853) — passing this sandbox's LAN IP
+(`192.168.1.176` on `ens18`) makes `RadiodControl` call
+`setsockopt(IP_MULTICAST_IF, ...)` on the send socket (control.py:940-943),
+which overrides the `239.0.0.0/8 -> dev lo` kernel route Round 1
+diagnosed for *locally-originated* multicast sends specifically. No
+system routing changes were made or needed. This alone got commands onto
+the wire (re-verified with the same tcpdump method as Round 1 — see
+below) but was **not sufficient by itself**: a second, independent
+requirement was found and is the more interesting result of this round.
+
+### Second requirement found: `destination=` must be explicit and must name an address radiod already uses
+
+With `interface=` set, outbound packets correctly left `ens18` addressed
+to the right group:port (confirmed by tcpdump), but `create_channel()`
+calls with no `destination=` argument (relying on the docstring's claim
+"If not specified, uses radiod's config-file default") still never
+produced a visible channel — `discover_channels()` stayed at 45 for up
+to 20s, repeatedly, across many SSRC values. A controlled back-to-back
+A/B test (identical `interface=`, identical timing, two SSRCs created
+30ms apart from the same script) isolated the cause:
+
+```
+ssrc_a = 3999900033; create_channel(..., ssrc=ssrc_a)                      # no destination
+ssrc_b = 3999900034; create_channel(..., ssrc=ssrc_b, destination="239.139.172.41")  # explicit, pre-existing group
+# 10s later:
+A (no destination) present: False
+B (explicit destination) present: True
+```
+
+A synthetic/unused destination (`239.253.99.99:5004`, chosen to not
+collide with any live channel) was also tried and also failed to
+produce a visible channel — so the requirement is not "any explicit
+destination," specifically "a destination radiod is already configured
+to accept output on." `239.139.172.41` (read from a live channel's
+`ChannelInfo.multicast_address` via `discover_channels()` immediately
+before use) was confirmed to work reproducibly across three separate
+create calls in this round. `discover_channels()` shows **4** distinct
+data-destination groups in use across the 45 real channels on b1
+(`239.28.203.44`, `239.139.172.41`, `239.246.80.65`, `239.189.131.197`),
+so this radiod deployment is not a single-group deployment — it appears
+to restrict channel *creation* to a fixed, pre-configured set of output
+destinations rather than accepting an arbitrary one from the client, and
+(separately) has no config-file default destination that omitting
+`destination=` can fall back to, contradicting the `create_channel`
+docstring's claim for this specific deployment. This is a real,
+reproducible finding about this radiod's configuration/behavior, not an
+artifact of the sandbox — it persisted after the routing fix and across
+repeated, controlled tries. Every Round 2 probe uses
+`destination="239.139.172.41"` (an already-shared, many-SSRCs-per-group
+address, which is exactly the `MultiStream` architecture's design
+assumption per CLAUDE.md — "radiod publishes many bands into one
+multicast group" — so injecting one more test SSRC's RTP output into
+that same group does not disturb any of the real channels sharing it,
+each already being demultiplexed by SSRC on the receive side).
+
+Delivery re-confirmed by tcpdump (same method as Round 1): during a live
+`create_channel`+`remove_channel` call with `interface="192.168.1.176"`,
+`sudo tcpdump -i ens18 'udp and dst net 239.0.0.0/8 and dst port 5006'`
+captured the outbound packets (`192.168.1.176.44285 > 239.205.73.40.5006`),
+confirming they now leave the host — this is the "commands onto the
+wire" check the coordinator asked for before proceeding, and it passed.
+
+### Cheap end-to-end check (run before the full probe set, per instructions)
+
+```
+$ uv run python -c "create_channel(7_040_000.0, preset='usb', sample_rate=12000,
+    ssrc=3999900001, destination='239.139.172.41'); poll_channel(...)"
+ChannelInfo(ssrc=3999900001, preset='usb', sample_rate=12000, frequency=7040000.0,
+            snr=-inf, multicast_address='239.139.172.41', port=5004, encoding=2, ...)
+```
+Real channel, real SSRC, real poll response. Proceeded to the full probe
+set.
+
+### Probes and adaptations (Round 2)
+
+Every probe adds `interface="192.168.1.176"` to each `RadiodControl(...)`
+construction and `destination="239.139.172.41"` to each `create_channel`/
+`ManagedStream(...)` call, with each probe's docstring updated to explain
+why. `RadiodStream`'s RTP receive path (`ka9q/stream.py`) needed no
+interface override — it already calls `join_multicast_all_interfaces`
+(stream.py ~421-457), joining the data group on every local IPv4
+interface, so once channel creation succeeded, sample reception worked
+without further changes. One additional probe,
+`probe_keepalive_settings_variant.py`, was added in this round (see
+below) because the original `probe_keepalive_settings.py`, now that it
+could actually create a channel, exposed a probe-design problem worth
+fixing rather than reporting as the final word on Q4.
+
+### Probe 1 — `probe_create_twice.py` (SSRC 3999900001)
+
+```
+first:  {'frequency': 7040000.0, 'sample_rate': 12000, 'preset': 'usb', 'encoding': 2}
+second: {'frequency': 7040000.0, 'sample_rate': 12000, 'preset': 'usb', 'encoding': 2}
+CONVERGES
+exit=0
+```
+Real result: two identical `create_channel()` calls against the same
+SSRC produce identical polled state. This matches Task 6 Q1's own
+prediction for the *identical-params* case (the delta-update mechanism
+is invisible when nothing differs between the two calls — see Q1's text
+and `probe_create_twice.py`'s docstring). `encoding=2` (S16BE) even
+though neither call requested an encoding — this is this radiod's
+preset/template default output encoding for `usb`, not a bug.
+
+### Probe 1b — `probe_create_twice_variant.py` (SSRC 3999900004)
+
+```
+first:  {'frequency': 7040000.0, 'sample_rate': 48000, 'preset': 'usb', 'encoding': 2}
+second: {'frequency': 7040000.0, 'sample_rate': 12000, 'preset': 'usb', 'encoding': 2}
+SAMPLE_RATE RESET (contradicts DEFECT verdict)
+exit=1
+```
+**This is the most important real result of Round 2, and it needs a
+careful reading, not just the probe's own printed verdict.** The second
+`create_channel()` call omitted `sample_rate` entirely (no
+`OUTPUT_SAMPRATE` TLV sent), yet the channel's sample rate read back as
+`12000`, not the first call's `48000`. A naive reading says this
+*contradicts* Q1's DEFECT verdict (delta-update, value preserved) — but
+`12000` is not an arbitrary/random value: it is `usb`'s **preset
+default** sample rate on this radiod's `presets.conf`. Re-read against
+Q1's own text in this file (see "Q1" section above): *"Whether a given
+preset's ini stanza defines low/high keys is a runtime config fact... the
+practical blast radius of the gap is needs-empirical even though the
+code-level mechanism (delta-not-reset) is fully confirmed by source."*
+This probe found exactly that runtime fact for `sample_rate` specifically
+on this radiod: the `usb` preset's config stanza apparently *does* define
+a default samprate, and `PRESET`'s handler (`loadpreset()`,
+`src/modes.c:294`, cited in Q1) reapplies it on every create carrying a
+`PRESET` tag — regardless of whether the current command also carries an
+explicit `OUTPUT_SAMPRATE` override. The first call's `48000` almost
+certainly worked because the explicit `OUTPUT_SAMPRATE` TLV in that same
+packet is applied *after* (or independently of) `loadpreset()`'s
+preset-default write, overriding it within that one packet — but with no
+`OUTPUT_SAMPRATE` TLV in the second packet, only the preset default
+survives. **Net conclusion: the delta-update mechanism Q1 describes is
+real (this is not a template/struct reset — `frequency` and `preset`
+persisted unchanged across both calls, and the channel's identity/PID
+etc. were not reinitialized), but it is not blanket "everything an
+earlier call set persists forever" either — any field the current
+preset's config stanza defines gets reasserted to that preset's default
+on every `PRESET`-bearing create, independent of delta-update semantics
+for that specific field.** This refines Q1's DEFECT verdict rather than
+overturning it: the risk Q1 describes (a stale custom value silently
+surviving a re-create) is real for fields the preset doesn't define, and
+does *not* apply to fields the preset does define (those get
+preset-defaulted every time, which is arguably safer but has its own
+surprise: a caller who set a custom `sample_rate` once, then later calls
+`create_channel()` again without repeating it, silently *loses* the
+custom value back to the preset default — the opposite failure mode from
+what Q1's text emphasizes, but still an instance of "the docstring's
+'uses default if not set' claim is only true for a fresh SSRC" being an
+incomplete picture of what actually happens on a re-create).
+
+### Probe 2 — `probe_keepalive_settings.py` (SSRC 3999900002, brief's original design, `lifetime=20`)
+
+```
+encoding before/after: 2 None
+LOST
+exit=1
+```
+Real result, but see the important caveat: `lifetime=20` is 20 radiod
+**frames** (control.py:1313-1322: "~1000 frames ≈ 20s" at the default
+20ms blocktime), i.e. **~0.4 seconds** of protected time, not 20 seconds
+— almost certainly a units slip in the brief's original probe design (it
+reused `lifetime=20` assuming it meant "20 of something ≈ the sleep
+duration"). A single poll at t=0, then a flat 30s sleep with zero further
+activity, gives a ~0.4s-lifetime channel essentially no chance to survive
+regardless of any keepalive mechanism. The "LOST" result mixes two
+different things (expired vs. encoding-changed-while-alive) into one
+bit — see Probe 2b below for the corrected, two-phase test that actually
+answers Q4.
+
+### Probe 2b — `probe_keepalive_settings_variant.py` (SSRCs 3999900008, 3999900009; `lifetime=1000` ≈ 20s; added this round)
+
+```
+Phase A (plain poll_channel() every 5s, no set_channel_lifetime()):
+  t+0s encoding: 2      # raced the separate OUTPUT_ENCODING packet -- see note
+  t+5s encoding: 4
+  t+10s encoding: 4
+  t+15s encoding: 4
+  t+20s encoding: None  # channel expired on schedule
+  t+25s encoding: None
+  t+30s encoding: None
+
+Phase B (explicit set_channel_lifetime() refresh every 5s):
+  t+0s .. t+30s encoding: 4  4  4  4  4  4  4   # survived, unchanged
+
+Phase A survived to t+30s (bare poll IS a keepalive): False
+Phase B survived to t+30s with encoding preserved throughout: True
+exit=0
+```
+Two clean, real, reproducible findings:
+1. **A bare `poll_channel()` query does NOT extend a channel's LIFETIME
+   on this radiod build.** Phase A's channel died right on the raw
+   `lifetime=1000`-frame (~20s) schedule despite four polls before that
+   point. This contradicts `set_channel_lifetime`'s own docstring
+   (control.py:1968-1970: *"Polling auto-extends a non-zero lifetime to
+   at least ~20s, so a client... should call this method **(or any other
+   poll)** periodically as a keep-alive"*) — the parenthetical "(or any
+   other poll)" claim does not hold empirically for a plain status query
+   on this build. This is a **new defect candidate for Task 8/9**: either
+   the docstring overclaims (fix: narrow the claim to
+   `set_channel_lifetime`/any LIFETIME-tag-bearing command specifically),
+   or radiod's own idle-timeout-floor logic doesn't cover a bare CMD
+   query the way the comment assumes and the assumption needs
+   cross-checking against `AUDIT_HEAD`'s `src/radio_status.c`.
+2. **`set_channel_lifetime()` itself works exactly as designed and as
+   Q4's VERIFIED-BY-CODE verdict predicted**: Phase B's channel survived
+   the full 30s window with encoding reading back as `F32LE` (`4`) at
+   every single 5s check, confirming both the lifetime-refresh and the
+   encoding-re-assertion halves of that method's contract
+   (control.py:1990-2000's "Note" about `731ce5e`'s
+   HamSCI/ka9q-python#3 fix).
+
+(The `t+0s encoding: 2` in Phase A is a minor, separately-explainable
+observation, not part of either finding above: `create_channel` sends
+the main creation packet and the `OUTPUT_ENCODING` packet as two
+separate UDP sends — control.py:1468 then :1471-1487 — so a poll that
+lands in the brief window between them can observe the preset's default
+encoding (`2`, S16BE) before the second packet is processed. By t+5s it
+had settled to `4` as expected.)
+
+### Probe 3 — `probe_recovery_equivalence.py` (real SSRC allocated: `1517029203`)
+
+```
+Stream drop detected: No packets for 3.1s (timeout: 3.0s)
+actual_ssrc (hash-derived, not test-range): 1517029203
+before: {'frequency': 7940003.0, 'sample_rate': 12000, 'preset': 'usb', 'encoding': 2}
+after:  {'frequency': 7940003.0, 'sample_rate': 12000, 'preset': 'usb', 'encoding': 2}
+EQUIVALENT
+exit=0
+```
+Full end-to-end success: `ManagedStream.start()` created a real channel,
+received real RTP samples, detected the simulated drop (`saboteur.
+remove_channel()`) within its configured `drop_timeout_sec=3.0` window
+("No packets for 3.1s"), and the background health-monitor thread
+recreated the channel via `ensure_channel()` (which reuses
+`self._destination`, confirmed by reading `_attempt_restore()` at
+managed_stream.py:396-440) — all without any code changes, exactly as
+`ManagedStream`'s design intends. `before == after` on
+`frequency`/`sample_rate`/`preset`/`encoding` **confirms Task 6 Q3's
+VERIFIED-BY-CODE verdict with a live radiod restart-recovery cycle** —
+the strongest, cleanest positive result of this round.
+
+Adaptation reminder: `actual_ssrc` (`1517029203`) is hash-derived by
+`allocate_ssrc` from the probe's frequency/preset/params — it is **not**
+in the `3999900000-3999900999` range, because `ManagedStream` has no
+`ssrc=` override (see the probe's docstring for the full reasoning, this
+was also true and documented in Round 1). It was explicitly removed via
+`c.remove_channel(actual_ssrc)` in `finally` and confirmed absent by a
+follow-up `discover_channels()` check.
+
+### Step 3 — Leftover check (Round 2, after all probes)
+
+```
+bee1-status.local total: 45 leftovers in range: []
+bee2-status.local total: 45 leftovers in range: []
+```
+Zero leftovers in the reserved SSRC range on either host — channel count
+back to the 45-channel baseline on both. The recovery probe's
+out-of-range SSRC (`1517029203`) was separately confirmed absent via a
+follow-up `discover_channels()` call (`1517029203 present: False`). All
+other SSRCs created during this round's diagnosis (interface/destination
+troubleshooting: `3999900002`, `3999900003`, `3999900005`-`3999900010`,
+`3999900020`, `3999900021`, `3999900030`-`3999900034`, plus two
+auto-allocated diagnostic SSRCs `1929612220`/`1483579970` that were never
+actually created because they predated the `destination=` fix) were each
+explicitly removed by their diagnostic scripts and are covered by the
+same clean 45-channel/empty-leftover result above.
+
+### How Round 2 reconciles with Task 6
+
+- **Q1** (`create_channel` convergence): **DEFECT confirmed live**, with
+  an important refinement from Probe 1b — see that probe's writeup
+  above. The delta-update mechanism is real and reproducible, but its
+  actual effect on a given field on a given re-create depends on whether
+  the requested preset's config stanza defines that field: fields the
+  preset defines get preset-defaulted on every `PRESET`-bearing create
+  (which is its own, different footgun — silent loss of a previously-set
+  custom value on a "harmless" re-create); fields the preset doesn't
+  define behave exactly as Q1's original text describes (stale value
+  silently persists). Recommend Task 8 update idempotency.md's Q1
+  section (or a linked erratum) with this empirical refinement, and
+  update the `create_channel` docstring's "uses radiod's default if not
+  set" claim to note it can mean either "radiod's preset default" or
+  "whatever was already there," depending on whether the field is
+  preset-controlled — the current wording implies the former
+  unconditionally.
+- **Q3** (recovery equivalence): **VERIFIED-BY-CODE claim now also
+  VERIFIED LIVE** for `ManagedStream` — Probe 3 is a clean, real
+  drop-detect-recover cycle producing identical polled state.
+  `MultiStream`'s separate restore defect (Step 2's row 6) was not
+  re-tested this round (out of this task's three-probe scope; still
+  code-derived only).
+- **Q4** (keepalive preservation): **VERIFIED-BY-CODE claim now also
+  VERIFIED LIVE** for `set_channel_lifetime` specifically (Probe 2b,
+  Phase B) — encoding survives 30s of repeated explicit refresh calls
+  intact. **New finding, not previously flagged by Task 6**: a bare
+  `poll_channel()` query does *not* extend LIFETIME despite
+  `set_channel_lifetime`'s docstring claiming "(or any other poll)"
+  does — Probe 2b, Phase A. Flagging this as a candidate defect/erratum
+  for Task 8 (either fix the docstring's overclaim, or — if this is
+  radiod-build-specific rather than universal — scope the claim to
+  builds with the relevant idle-timeout behavior).
+- **Q5** (resequencer continuity): still NEEDS-EMPIRICAL; genuinely out
+  of this task's scope (would need a dedicated dual-receiver probe
+  comparing two live `PacketResequencer` consumers of the same real
+  stream, not attempted this round).
+
+### Concerns / follow-ups for Task 8
+
+1. Update idempotency.md's Q1 verdict text (or add a cross-reference) to
+   incorporate Probe 1b's refinement about preset-controlled fields.
+2. Investigate/fix the `set_channel_lifetime` docstring's "(or any other
+   poll)" claim (control.py:1968-1970) — Probe 2b's Phase A contradicts
+   it on this radiod build. Check whether this is a radiod-build/version
+   difference (worth a Task 9/AUDIT_HEAD cross-check of the idle-timeout
+   logic in `src/radio_status.c`) or simply an inaccurate docstring that
+   should be narrowed to "call `set_channel_lifetime()` (or any command
+   that includes a LIFETIME tag) periodically."
+3. `create_channel`'s destination-default docstring claim ("If not
+   specified, uses radiod's config-file default") does not hold on
+   `bee1-status.local`/`bee2-status.local` — omitting `destination=`
+   silently fails to create the channel rather than falling back to a
+   config default. Worth deciding whether this is deployment-specific
+   (some radiod configs have no default destination configured) and, if
+   so, whether `ensure_channel`/`create_channel` should surface a
+   clearer error instead of the current silent no-op-looking failure
+   (the command is accepted at the transport level with no error raised
+   to the caller — the only symptom is a subsequent `poll_channel()`
+   timeout or `ensure_channel`'s `TimeoutError`, which does not point at
+   `destination` as the cause).
