@@ -413,3 +413,215 @@ Related but distinct failure mode: see the **`set_lock()` — a command
 radiod never processes** subsection below, which is a state-consistency
 defect of a different shape (a write that is universally a no-op on the
 wire, not a maintenance path that partially forgets what it once sent).
+
+---
+
+## Empirical results (Task 7)
+
+**Status: BLOCKED at the write path.** Both permitted hosts
+(`bee1-status.local`, `bee2-status.local`) are read-reachable — live
+STATUS multicast from real, already-running radiod channels arrives
+normally and `discover_channels()`/`poll_channel()` decode it correctly —
+but every outbound control command sent from this sandbox
+(`create_channel`, `remove_channel`, and `ensure_channel`'s internal
+create, exercised via `ManagedStream.start()`) silently fails to reach
+either radiod. This is an environment-level networking fact of the
+sandbox this task ran in, not a finding about ka9q-python or radiod
+itself, and it blocks all four probes below from producing usable
+pass/fail evidence for Task 6's verdicts. Full diagnosis, all four
+probes' real (negative) output, and the leftover-check are recorded
+below per the "do NOT fake results" rule — none of the exit
+codes/CONVERGES/PRESERVED strings below should be read as validating or
+refuting Task 6 without the caveat in every subsection.
+
+### Root cause (confirmed, not just suspected)
+
+1. `discover_channels("bee1-status.local", listen_duration=5)` returns 45
+   real channels immediately (live production/monitoring traffic
+   correctly received on `ens18`) — read path works.
+2. `create_channel(...)` sends without a socket error (`send_command`
+   returns normally, hex dump confirms correct TLV wire encoding,
+   verified separately for `encode_int(SSRC=3999900001)` against the
+   `0xEE69A161` bit-31-set case Task 6 flagged) — but the created SSRC
+   never subsequently appears in `discover_channels()` (checked with
+   listen windows up to 20s) or in a direct `poll_channel()` (checked
+   with 5 sequential 3s-spaced polls). Reproduced with both an explicit
+   in-range SSRC (`3999900050`, `3999900051`) and an auto-allocated
+   31-bit SSRC (`1929612220`) — not specific to the audit's SSRC range or
+   to the bit-31 case.
+3. Reproduced identically on `bee2-status.local` (45 pre-existing
+   channels; SSRC `3999900060` never appears after creation) — not
+   host-specific.
+4. `ip route get 239.205.73.40` (bee1's resolved status/control group)
+   returns `multicast 239.205.73.40 dev lo src 192.168.1.176` — this
+   sandbox's kernel routing table has a `239.0.0.0/8 dev lo` entry
+   (`ip route show`) that routes **all locally-originated** multicast
+   sends to any `239.x.x.x` destination to loopback, regardless of
+   destination or the real interface (`ens18`) that inbound traffic from
+   the actual radiod arrives on.
+5. Confirmed by packet capture during a live `create_channel` +
+   `remove_channel` call: `sudo tcpdump -i ens18 'udp and dst net
+   239.0.0.0/8 and dst port 5006'` captured **zero** packets;
+   `sudo tcpdump -i lo` on the same filter captured all 5 (create +
+   encoding + remove-related) outbound packets, sourced from
+   `127.0.0.1`. The command genuinely never leaves this host.
+6. `ensure_channel` (exercised indirectly via `ManagedStream.start()` in
+   `probe_recovery_equivalence.py`) fails the same way, from the inside:
+   `TimeoutError: Channel SSRC 1913996770 not verified within 5.0s.` —
+   consistent with the same root cause, not a separate bug in
+   `ensure_channel`.
+
+Net effect: this sandbox can **observe** the real fleet (useful for
+read-only audit work) but cannot **control** it — every write this task's
+probes depend on is discarded by the kernel before it reaches the
+network. This was not caught by the brief's suggested `ping` reachability
+check because `bee1-status.local`/`bee2-status.local` resolve to
+multicast addresses, not unicast host IPs, so ICMP echo doesn't test the
+relevant path either way; `discover_channels()` looked like a positive
+reachability signal but only exercises the read path.
+
+No attempt was made to work around the `dev lo` route (e.g. adding a
+more-specific route via `ens18`, or `SO_BINDTODEVICE`) — that would mean
+editing this sandbox's system routing table, which is out of scope for a
+docs-only audit task and indistinguishable at this remove from an
+intentional guardrail keeping an agent from being able to send live
+control commands to real, shared radiod hardware. Fixing this (if it is
+in fact just an environment misconfiguration rather than a deliberate
+boundary) is a prerequisite for Task 6's `needs-empirical` items to ever
+be closed empirically, and is called out as a blocker for whoever picks
+this up next.
+
+### Adaptations made (verified against source before running, per the brief)
+
+- `ChannelInfo.encoding` (ka9q/discovery.py) is a plain `int` field, not
+  an `Encoding` enum instance; `Encoding.F32LE` is itself a bare int
+  constant (`4`), so the brief's `after.encoding == Encoding.F32LE`
+  comparison needed no attribute-name change.
+- `ManagedStream.__init__` has no `ssrc=` parameter — the SSRC is always
+  derived deterministically inside `ensure_channel` ->
+  `allocate_ssrc(...)`. There is no supported way to force it into the
+  `3999900000-3999900999` range. `probe_recovery_equivalence.py` reads
+  the real SSRC back from `stream.start()`'s returned `ChannelInfo.ssrc`
+  and explicitly removes that actual SSRC in `finally` (since
+  `ManagedStream.stop()` intentionally does not call `remove_channel` —
+  channels are meant to be shareable). This is a documented deviation
+  from the SSRC-range rule for this one probe; see the probe file's
+  docstring for the full reasoning. In practice `ensure_channel` never
+  got far enough to allocate/verify a channel (see root cause above), so
+  no channel outside the reserved range was ever actually created on
+  radiod.
+- `ManagedStream.stop()` method name and `ManagedStreamStats` return type
+  confirmed by reading `ka9q/managed_stream.py` directly; used as in the
+  brief.
+- Added a fourth probe, `probe_create_twice_variant.py`, per the
+  brief's interpretation note ("create with different params second
+  time"): first call sets `sample_rate=48000`, second call on the same
+  SSRC omits `sample_rate` (falls back to `None`, so `OUTPUT_SAMPRATE` is
+  never sent the second time). This is the concrete scenario Q1's DEFECT
+  verdict describes in idempotency.md's Q1 section ("a first create sets
+  a non-default sample_rate; a second create ... leaves that value in
+  place"). Blocked at the write path along with the other three, same
+  root cause.
+- `discover_channels()` returns a `Dict[int, ChannelInfo]` keyed by SSRC,
+  not a list of `ChannelInfo` (the brief's Step-3 leftover-check snippet
+  iterates `for ch in discover_channels(...)` and reads `ch.ssrc`, which
+  would iterate dict *keys* — already-int SSRCs — and then fail on
+  `ch.ssrc`). Adjusted to `for ssrc, ch in discover_channels(...).items()`.
+
+### Probe 1 — `probe_create_twice.py`
+
+```
+$ uv run python docs/audit/2026-08-12-alignment/probes/probe_create_twice.py
+first:  {'frequency': None, 'sample_rate': None, 'preset': None, 'encoding': None}
+second: {'frequency': None, 'sample_rate': None, 'preset': None, 'encoding': None}
+CONVERGES
+exit=0
+```
+Both `poll_channel()` calls returned `None` (channel never created; see
+root cause) and `snap(None)` reads every field as `None` via
+`getattr(info, f, None)` on a `None` object short-circuiting to the
+default. `first == second` is trivially true because both are the same
+all-`None` dict — **this is not evidence of convergence**, real or
+otherwise. **NOT USABLE as evidence for Q1.**
+
+### Probe 1b — `probe_create_twice_variant.py`
+
+```
+$ uv run python docs/audit/2026-08-12-alignment/probes/probe_create_twice_variant.py
+first:  {'frequency': None, 'sample_rate': None, 'preset': None, 'encoding': None}
+second: {'frequency': None, 'sample_rate': None, 'preset': None, 'encoding': None}
+SAMPLE_RATE RESET (contradicts DEFECT verdict)
+exit=1
+```
+Same failure mode: `second["sample_rate"]` is `None`, not `48000`, so the
+probe's own preservation check fails — but only because nothing was ever
+created, not because radiod reset anything. **NOT USABLE as evidence for
+Q1.**
+
+### Probe 2 — `probe_keepalive_settings.py`
+
+```
+$ uv run python docs/audit/2026-08-12-alignment/probes/probe_keepalive_settings.py
+encoding before/after: None None
+LOST
+exit=1
+```
+`before`/`after` both `None` for the same reason. **NOT USABLE as
+evidence for Q4.**
+
+### Probe 3 — `probe_recovery_equivalence.py`
+
+```
+$ uv run python docs/audit/2026-08-12-alignment/probes/probe_recovery_equivalence.py
+Traceback (most recent call last):
+  File ".../probe_recovery_equivalence.py", line 62, in <module>
+    started = stream.start()
+  File ".../ka9q/managed_stream.py", line 231, in start
+    self._channel = self._control.ensure_channel(
+  File ".../ka9q/control.py", line 1894, in ensure_channel
+    raise TimeoutError(
+TimeoutError: Channel SSRC 1913996770 not verified within 5.0s. Requested: 7.940 MHz, usb, 12000 Hz
+exit=1
+```
+`ManagedStream.start()` never gets past the initial `ensure_channel`
+call, so the saboteur/recovery portion of the probe never runs. This *is*
+informative in one narrow sense: it confirms `ensure_channel`'s
+`TimeoutError` failure mode (documented in its docstring) triggers
+correctly and with a clear message when a channel genuinely can't be
+verified — but it says nothing about recovery equivalence (Q3), which
+needs a channel to exist first. **NOT USABLE as evidence for Q3.**
+
+### Step 3 — Leftover check
+
+```
+$ uv run python -c "... discover_channels(host, listen_duration=6) for host in (bee1, bee2) ..."
+bee1-status.local total: 45 leftovers in range: []
+bee2-status.local total: 45 leftovers in range: []
+```
+No leftovers on either host (expected, since no test channel was ever
+actually created — every probe's `remove_channel()` in its `finally`
+block ran against an SSRC radiod never had). Channel count on both hosts
+(45) matched the pre-probe baseline taken before any probe ran.
+
+### How this reconciles with Task 6
+
+None of Task 6's five verdicts are confirmed or refuted by this session.
+The `needs-empirical` list in idempotency.md is unchanged:
+- **Q1** (`create_channel` convergence) — still DEFECT by code, still
+  needs-empirical for live confirmation.
+- **Q3** (recovery equivalence) — still VERIFIED-BY-CODE, still
+  needs-empirical for a live `ManagedStream` restore.
+- **Q4** (keepalive preservation) — still VERIFIED-BY-CODE for
+  `set_channel_lifetime`, still needs-empirical.
+- **Q5** (resequencer continuity) — still NEEDS-EMPIRICAL; not attempted
+  this session (would need RTP data flowing, which requires the same
+  broken write path to establish a channel in the first place).
+
+**New item for the needs-empirical list**: before any future empirical
+session can produce real evidence, the executing sandbox's outbound
+route for `239.0.0.0/8` must reach the real interface carrying traffic to
+`bee1-status.local`/`bee2-status.local` (currently pinned to `dev lo` in
+this session's environment) — verify with `ip route get <resolved
+status-group-IP>` before running probes, not just a reachability
+ping/discover check, since discovery alone cannot distinguish a working
+write path from a one-way read-only relay.
