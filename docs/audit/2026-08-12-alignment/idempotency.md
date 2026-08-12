@@ -255,11 +255,48 @@ COMMAND_TAG, LIFETIME(opt), OUTPUT_ENCODING(opt, 2nd packet)}`
 | 1 | `create_channel` (baseline) | `control.py:1275-1488` | all, conditionally per arg (see Q1) | n/a — baseline | n/a |
 | 2 | `set_channel_lifetime` (keepalive) | `control.py:1960-2023` | `OUTPUT_SSRC`, `COMMAND_TAG`, `LIFETIME`, `OUTPUT_ENCODING` (if tracked/passed) | `PRESET`, `DEMOD_TYPE`, `RADIO_FREQUENCY`, `OUTPUT_SAMPRATE`, `LOW_EDGE`, `HIGH_EDGE`, `KAISER_BETA`, `AGC_ENABLE`, `GAIN`, `OUTPUT_DATA_DEST_SOCKET` | Intentional (minimal keepalive); confirmed harmless on pin (Q4). Encoding gap already fixed by `731ce5e`. **No new defect**, but see row 3. |
 | 3 | `tune()` | `control.py:2098-2231` | whichever of `PRESET`, `OUTPUT_SAMPRATE`, `LOW_EDGE`, `HIGH_EDGE`, `RADIO_FREQUENCY`, `GAIN`/`AGC_ENABLE`, `OUTPUT_ENCODING`, `RF_GAIN`, `RF_ATTEN`, `OUTPUT_DATA_DEST_SOCKET`, `LIFETIME` the caller passed non-`None` | by design, a targeted delta-setter (mirrors `tune.c`) — not meant to be a full resend, so field omission itself is not a defect | **DEFECT**: `tune(ssrc, encoding=X)` sends `OUTPUT_ENCODING` (`control.py:2195-2196`) but — unlike `create_channel` (`control.py:1484`) and `set_output_encoding` (`control.py:2896`) — **never writes `self._requested_encoding[ssrc] = X`**. `grep -n "_requested_encoding" control.py` shows exactly 2 write sites (1484, 2896) and this is not one of them. Any channel whose encoding was last changed via `tune()` has a stale (or absent) entry in `_requested_encoding`, so (a) the keepalive's `731ce5e` re-assertion (row 2) re-sends the *wrong* (or no) encoding on the next `set_channel_lifetime()` call, and (b) `verify_channel()`'s default `expected_encoding` (`control.py:1533`, defaults from the same dict) checks against the wrong value too. This silently defeats `731ce5e`'s fix for any client whose retune path is `tune()` rather than `create_channel`/`set_output_encoding`. |
-| 4 | `ensure_channel` — reuse branch | `control.py:1794-1849` | `LIFETIME` (if requested, `1832-1833`), `LOW_EDGE`/`HIGH_EDGE`/`KAISER_BETA` via `set_filter` (if any requested, `1840-1848`) | `AGC_ENABLE`, `GAIN` — **never re-sent on reuse, and never even checked as a mismatch trigger** | **DEFECT**: the match test at `1801-1822` only compares `frequency`, `sample_rate`, `destination`, `encoding` — `gain`/`agc_enable` are absent from both the comparison and the resend. The method's own docstring (`control.py:1721-1722`: `"...last-writer-wins, same model as gain/AGC"`) claims gain/AGC follow the same reconfigure-on-mismatch model as filter edges, but the code does not implement that for gain/AGC at all: a caller requesting a different `gain`/`agc_enable` on an already-matching (freq/rate/dest/encoding) channel gets the *other* caller's gain/AGC back, silently. Doc/code mismatch plus a real functional gap. |
+| 4 | `ensure_channel` — reuse branch | `control.py:1794-1849` | `LIFETIME` (if requested, `1832-1833`), `LOW_EDGE`/`HIGH_EDGE`/`KAISER_BETA` via `set_filter` (if any requested, `1840-1848`) | `AGC_ENABLE`, `GAIN` — not re-sent on reuse, and not checked as a mismatch trigger | **NOT A DEFECT — docstring imprecision only.** Corrected after review: the match test at `1801-1822` indeed only compares `frequency`, `sample_rate`, `destination`, `encoding`, omitting `gain`/`agc_enable`. But the "stale gain/AGC on an already-matching channel" scenario this implies is **unreachable through the normal `ensure_channel` API**: the lookup SSRC itself is `allocate_ssrc(..., agc=bool(agc_enable), gain=gain, ...)` (`control.py:1782-1791`) — `gain` and `agc_enable` are inputs to the SSRC hash. Two `ensure_channel()` calls that differ in `gain`/`agc_enable` therefore compute **different SSRCs** and poll **different channels** (`control.py:1797-1800`); there is no way for a caller to land on an existing channel whose `gain`/`agc_enable` differ from what it just asked for, short of a ~2^-31 SHA-256 collision (already covered, low-priority, in Q2) or an explicit `ssrc=` override passed directly to `create_channel` (bypassing `ensure_channel` entirely, a different call path not audited here). The only real issue is the docstring's wording (`control.py:1721-1722`: `"...last-writer-wins, same model as gain/AGC"`) — it analogizes to gain/AGC as if they were reconfigured like filter edges on a reuse, which is misleading/inaccurate phrasing since gain/AGC can never actually observe a "reuse with different value" state to reconfigure *from*. Recommend rewording that docstring sentence to stop implying a reuse-time reconciliation happens for gain/AGC; no functional fix needed. |
 | 5 | `ensure_channel` — create/reconfigure branch | `control.py:1865-1880` | delegates to `create_channel` with the full set incl. `ssrc=`, `lifetime=`, `low_edge=`, `high_edge=`, `kaiser_beta=` | none vs. `create_channel` (full pass-through) | Verified-by-code, matches baseline. Inherits Q1's existing-SSRC delta-update caveat from radiod. |
-| 6 | `MultiStream._attempt_restore` | `multi_stream.py:687-724` | `ensure_channel(frequency_hz=slot.frequency_hz, preset=slot.preset, sample_rate=slot.sample_rate, encoding=slot.encoding, lifetime=slot.lifetime)` | `agc_enable`, `gain`, `low_edge`, `high_edge`, `kaiser_beta` — all silently dropped | **DEFECT (highest-confidence finding of this audit)**: `MultiStream.add_channel()` (`multi_stream.py:150-211`) accepts and forwards `agc_enable`, `gain`, `low_edge`, `high_edge`, `kaiser_beta` to the *initial* `ensure_channel()` call (`multi_stream.py:199-211`), but `_ChannelSlot` (`multi_stream.py:66-99`) **does not have fields to store any of them** — only `frequency_hz`, `preset`, `sample_rate`, `encoding`, `lifetime` are persisted per-slot. `_attempt_restore()` can therefore only ever pass those 5 back into `ensure_channel()`, which supplies its own defaults for the rest (`agc_enable=0, gain=0.0, low_edge=None, high_edge=None, kaiser_beta=None`, `control.py:1660-1669`). The `lifetime` field's own docstring shows the team already solved this exact problem for one field (`multi_stream.py:176-183`: `"The value is stored per-slot so the drop/restore path re-applies it: a channel that radiod self-destructs and we then restore won't silently lose its lifetime"`) — and `encoding` is likewise stored and reapplied — but `agc_enable`/`gain`/`low_edge`/`high_edge`/`kaiser_beta` were not given the same treatment. On any restore that reaches the reconfigure branch of `ensure_channel` (Q1: happens whenever freq/rate/dest/encoding don't already match, which is the common post-radiod-restart case since the channel doesn't exist at all), `create_channel` is called with `agc_enable=0, gain=0.0` and no filter edges — **unconditionally resetting AGC/gain to defaults and any custom passband to the preset default**, exactly the "keepalive/restore silently drops a creation-time setting" bug class `731ce5e` fixed for encoding, reproduced for five more fields in the sibling restore path. |
+| 6 | `MultiStream._attempt_restore` | `multi_stream.py:687-724` | `ensure_channel(frequency_hz=slot.frequency_hz, preset=slot.preset, sample_rate=slot.sample_rate, encoding=slot.encoding, lifetime=slot.lifetime)` | `agc_enable`, `gain`, `low_edge`, `high_edge`, `kaiser_beta` — all silently dropped | **DEFECT (highest-confidence finding of this audit)**: `MultiStream.add_channel()` (`multi_stream.py:150-211`) accepts and forwards `agc_enable`, `gain`, `low_edge`, `high_edge`, `kaiser_beta` to the *initial* `ensure_channel()` call (`multi_stream.py:199-211`), but `_ChannelSlot` (`multi_stream.py:66-99`) **does not have fields to store any of them** — only `frequency_hz`, `preset`, `sample_rate`, `encoding`, `lifetime` are persisted per-slot. `_attempt_restore()` can therefore only ever pass those 5 back into `ensure_channel()`, which supplies its own defaults for the rest (`agc_enable=0, gain=0.0, low_edge=None, high_edge=None, kaiser_beta=None`, `control.py:1660-1669`). The `lifetime` field's own docstring shows the team already solved this exact problem for one field (`multi_stream.py:176-183`: `"The value is stored per-slot so the drop/restore path re-applies it: a channel that radiod self-destructs and we then restore won't silently lose its lifetime"`) — and `encoding` is likewise stored and reapplied — but `agc_enable`/`gain`/`low_edge`/`high_edge`/`kaiser_beta` were not given the same treatment. On any restore that reaches the reconfigure branch of `ensure_channel` (Q1: happens whenever freq/rate/dest/encoding don't already match, which is the common post-radiod-restart case since the channel doesn't exist at all), `create_channel` is called with `agc_enable=0, gain=0.0` and no filter edges — **unconditionally resetting AGC/gain to defaults and any custom passband to the preset default**, exactly the "keepalive/restore silently drops a creation-time setting" bug class `731ce5e` fixed for encoding, reproduced for five more fields in the sibling restore path. **Severity is worse than field-omission, though: it is identity-changing, not just value-dropping.** `agc_enable` and `gain` are inputs to `allocate_ssrc`'s hash (`control.py:1782-1791`, same fact that clears row 4 above), and `_attempt_restore()` never had the original values to pass — so when the original channel was created with a non-default `agc_enable`/`gain`, the restore's `ensure_channel()` call computes a **different SSRC** than the one being restored. `multi_stream.py` itself already has to handle this: `new_ssrc = channel_info.ssrc; if new_ssrc != ssrc: del self._slots[ssrc]; self._slots[new_ssrc] = slot` (`multi_stream.py:696-699`) exists precisely because a restore can land on a different SSRC — confirming the divergence is a reachable, anticipated runtime path, not a hypothetical. The restored stream is therefore not just misconfigured (wrong gain/AGC/passband); it can be a **structurally different channel** (new SSRC, new RTP stream identity) from the one the caller believes it is still receiving, with any downstream code keying off the original SSRC (logs, external correlation, another client's targeted `set_*` calls) silently pointed at a channel that no longer exists. |
 | 7 | `ChannelMonitor._check_and_recover` | `monitor.py:122-150` | `ensure_channel(**params)` where `params` is the original `monitor_channel(**kwargs)` dict, minus `timeout` | none — full generic pass-through | Verified-by-code, no gap (see Q3). |
 | 8 | `ManagedStream.start` / `_attempt_restore` | `managed_stream.py:231-239`, `414-423` | identical 7-field set both times | none between the two call sites (see Q3) | Verified-by-code for internal symmetry; coverage-limited relative to `create_channel`'s full surface (design gap, not this bug class). |
+
+### Related failure mode: `set_lock()` — a command radiod never processes
+
+Not a `731ce5e`-class bug (nothing is dropped from a *resend* — the field is
+never honored on *any* send, first or subsequent), but material to an
+idempotency audit for the same reason: it is another way a client's model
+of channel state silently diverges from radiod's actual state, with no
+error surfaced.
+
+`ka9q/control.py:3046-3056` (`set_lock`) builds and sends a TLV packet
+carrying `StatusType.LOCK` (`control.py:3051`: `"encode_int(cmdbuffer,
+StatusType.LOCK, 1 if lock else 0)"`), `OUTPUT_SSRC`, and `COMMAND_TAG` —
+the encode side is correct and `status.h` documents `LOCK` as a settable
+field ("Tuner is locked, will ignore retune commands (boolean)"), per
+Task 4's control-surface audit. But `decode_radio_commands()`
+(`src/radio_status.c:133-681`) has **no `case LOCK:`** in its switch
+statement at either the pin (`14d780af`, confirmed here — `grep -n "case
+LOCK" src/radio_status.c` returns nothing) or `AUDIT_HEAD` (per Task 4's
+`control-surface.md`, which found the same gap there). The `LOCK` TLV
+falls through to `default: break;` and is silently discarded — radiod
+never sets `chan->lock`, never acts on it, and never signals failure back
+to the caller. `set_lock()` returns normally either way; nothing in
+ka9q-python or the wire protocol distinguishes "lock applied" from "lock
+silently ignored".
+
+This does not intersect the keepalive/recreate paths audited in Step 2
+(no other method reads or re-sends `LOCK`, so there is no "partial resend"
+of it to compare), but it is the same class of harm this whole audit
+cares about: a caller that calls `set_lock(ssrc, True)` believes the
+tuner is now protected from retune, and it is not — every subsequent
+`tune()`/`create_channel()` call against that SSRC from *any* client
+still takes effect. Task 4's `control-surface.md` already recommends
+ka9q-python document or warn that `set_lock()` currently has no effect
+against real radiod; this audit concurs and notes it belongs in the same
+remediation pass as the Step 2 findings above, since both are instances
+of "the client's belief about channel state and radiod's actual state can
+silently diverge."
 
 ---
 
@@ -358,10 +395,21 @@ a value that could be negative or exceed 32 bits unexpectedly.
 | 5 | Resequencer continuity | **NEEDS-EMPIRICAL** |
 
 Sibling-bug scan defect count (Step 2, distinct from the five verdicts
-above where they overlap): **3** —
+above where they overlap): **2** —
 (a) `tune()` doesn't update `_requested_encoding` (row 3),
-(b) `ensure_channel`'s reuse branch never re-applies `gain`/`agc_enable`
-despite its own docstring's claim (row 4),
-(c) `MultiStream._attempt_restore` drops `agc_enable`/`gain`/`low_edge`/
-`high_edge`/`kaiser_beta` because `_ChannelSlot` never stores them (row 6,
-highest-confidence finding).
+(b) `MultiStream._attempt_restore` drops `agc_enable`/`gain`/`low_edge`/
+`high_edge`/`kaiser_beta` because `_ChannelSlot` never stores them, and —
+since `gain`/`agc_enable` are inputs to `allocate_ssrc`'s hash — the
+restore can silently target a *different SSRC* than the one being restored
+(row 6, highest-confidence finding).
+Row 4 (`ensure_channel`'s reuse branch and `gain`/`agc_enable`) was
+reclassified from defect to docstring-imprecision-only after review — see
+row 4's corrected entry above; the scenario it originally described is
+unreachable through the normal `ensure_channel` API because `gain`/
+`agc_enable` participate in SSRC derivation, so a mismatch on either
+routes to a different channel rather than a stale reuse.
+
+Related but distinct failure mode: see the **`set_lock()` — a command
+radiod never processes** subsection below, which is a state-consistency
+defect of a different shape (a write that is universally a no-op on the
+wire, not a maintenance path that partially forgets what it once sent).
