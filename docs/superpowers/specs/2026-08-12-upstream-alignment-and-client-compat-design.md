@@ -18,6 +18,12 @@ ka9q-python for two guarantees that have never been audited end-to-end:
    restarts, recovery landing in an identical channel state, keepalives
    preserving settings.
 
+ka9q-python is the **mandatory control path**: any client requiring a feed
+from an RX888 goes through ka9q-python to control radiod. There is no
+side-channel. Alignment therefore means more than covering current client
+usage — the full radiod control surface must be reachable through
+`RadiodControl`, or future clients will be blocked.
+
 Known drift already found during scoping:
 
 - CLAUDE.md's client roster is stale: hfdl-recorder and codar-sounder no
@@ -31,7 +37,9 @@ Known drift already found during scoping:
 
 1. A committed audit report answering: (a) is any client-relied behavior at
    risk from the 144-commit upstream delta; (b) which new radiod
-   capabilities is ka9q-python not exposing.
+   capabilities is ka9q-python not exposing; (c) which parts of the full
+   radiod control surface are unreachable through `RadiodControl` (the
+   mandatory-path completeness gap).
 2. Pin advanced to current upstream; `types.py`, `ka9q_radio_compat`,
    `ka9q/compat.py` regenerated together; full pytest green.
 3. A guardrail suite in-repo that fails **locally** before a change breaks
@@ -66,6 +74,12 @@ Three tracks feeding one ranked report.
 - Authoritative contract check: header diff (`status.h`, `rtp.h`,
   `multicast.h`) pinned-vs-current; re-run
   `scripts/check_upstream_drift.py` against the fresh clone.
+- **Control-surface completeness check:** enumerate every settable/readable
+  radiod parameter at current upstream (status.h TLVs and the command
+  paths radiod actually honors) and map each to its `RadiodControl`
+  equivalent. Since ka9q-python is the only control path for RX888-fed
+  clients, any unmapped parameter is a capability gap finding — reported
+  even if no current client uses it.
 
 ### 1b. Client contract matrix
 
