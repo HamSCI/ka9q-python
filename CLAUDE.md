@@ -16,13 +16,13 @@ uv sync --extra dev                    # standard; creates .venv/
 
 ### Run tests
 ```bash
-# All tests (~375 collected; unit tests run without a live radiod)
+# All tests (~415 collected; unit tests run without a live radiod)
 uv run pytest
 
 # Integration tests against a live radiod host
-uv run pytest --radiod-host=bee1-hf-status.local
+uv run pytest --radiod-host=bee1-status.local
 # or via environment variable
-RADIOD_HOST=bee1-hf-status.local uv run pytest
+RADIOD_HOST=bee1-status.local uv run pytest
 
 # Single test file / one test
 uv run pytest tests/test_control.py -v
@@ -54,7 +54,7 @@ The library exposes four progressively higher-level abstractions for consuming R
 
 3. **`ManagedStream`** (`managed_stream.py`) — High-level self-healing wrapper around `RadiodStream` that automatically recovers from radiod restarts and network interruptions.
 
-4. **`MultiStream`** (`multi_stream.py`) — Multi-channel multiplexer: one socket per multicast group, demultiplexes by SSRC across many channels. This is the substrate every sigmond recorder uses (psk-recorder, wspr-recorder, hfdl-recorder, codar-sounder) because radiod publishes many bands into one multicast group and a per-channel socket would over-subscribe the kernel.
+4. **`MultiStream`** (`multi_stream.py`) — Multi-channel multiplexer: one socket per multicast group, demultiplexes by SSRC across many channels. This is the substrate the sigmond recorders that multiplex many bands over one multicast group use (hf-timestd, wspr-recorder, psk-recorder, meteor-scatter, hfdl-recorder) because radiod publishes many bands into one multicast group and a per-channel socket would over-subscribe the kernel. (codar-sounder, hf-tec, and superdarn-sounder instead take a single `RadiodStream` per channel — they don't multiplex.)
 
 ### Core Components
 
@@ -72,7 +72,9 @@ The library exposes four progressively higher-level abstractions for consuming R
 
 - All radiod communication uses multicast UDP with TLV-encoded status packets
 - SSRC (Synchronization Source) identifies each channel; `allocate_ssrc()` generates deterministic SSRCs to avoid collisions across restarts
-- The default integration test radiod is `bee1-hf-status.local`; tests use `--radiod-host` or `RADIOD_HOST` env var to override
+- The default integration test radiod is `bee1-status.local`; tests use `--radiod-host` or `RADIOD_HOST` env var to override
+- ka9q-python is the mandatory control path: no sigmond-suite client may talk to radiod directly (own sockets, hand-built TLVs, or ka9q-radio CLI tools).
+- Exception: `ka9q-web` (a vendored third-party C dashboard) sends control commands to radiod directly and is excluded from this policy, the same as `ka9q-radio` itself — it predates the policy, it's not sigmond-authored, and it cannot import a Python library. Its exposure is operational (an upstream C tool with independent, hand-built TLV decoding), not an architectural gap in ka9q-python.
 
 ### Public API Surface
 
@@ -122,8 +124,9 @@ Operator workflow when the watcher is yellow/red:
    `types.py` and advance the pin.
 3. For *removed* or *value-shifted* critical fields: coordinate with
    downstream sigmond-suite clients (hf-timestd, wspr-recorder,
-   psk-recorder, hfdl-recorder, codar-sounder) *before* regenerating,
-   since they hard-code enum names and values via
+   psk-recorder, meteor-scatter, hfdl-recorder, codar-sounder, hf-tec,
+   superdarn-sounder, sigmond) *before* regenerating, since they
+   hard-code enum names and values via
    `from ka9q.types import StatusType, Encoding`. (wsprdaemon-client
    is deprecated; no longer a coordination concern.)
 4. After `--apply`: run `pytest`, then commit `types.py`,
