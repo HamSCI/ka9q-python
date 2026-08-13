@@ -36,13 +36,8 @@
         "StreamQuality",
         "discover_channels",
         "parse_rtp_header",
+        "rtp_to_utc",
         "rtp_to_wallclock"
-      ],
-      "ka9q.control": [
-        "CMD",
-        "encode_double",
-        "encode_eol",
-        "encode_int"
       ],
       "ka9q.discovery": [
         "ChannelInfo",
@@ -53,10 +48,7 @@
         "BILLION",
         "GPS_LEAP_SECONDS",
         "GPS_UTC_OFFSET",
-        "rtp_to_wallclock"
-      ],
-      "ka9q.types": [
-        "StatusType"
+        "rtp_to_utc"
       ],
       "ka9q.utils": [
         "resolve_multicast_address"
@@ -76,10 +68,14 @@
         "MultiStream",
         "RadiodControl",
         "SlotClock",
+        "SlotClockDesyncError",
         "rtp_to_utc"
       ],
       "ka9q.discovery": [
         "discover_radiod_services"
+      ],
+      "ka9q.status_listener": [
+        "StatusListener"
       ]
     },
     "psk-recorder": {
@@ -87,6 +83,7 @@
         "MultiStream",
         "RadiodControl",
         "SlotClock",
+        "SlotClockDesyncError",
         "rtp_to_utc"
       ],
       "ka9q.discovery": [
@@ -123,7 +120,7 @@
       "ka9q": [
         "MultiStream",
         "RadiodControl",
-        "rtp_to_wallclock"
+        "rtp_to_utc"
       ],
       "ka9q.discovery": [
         "ChannelInfo",
@@ -138,21 +135,16 @@
   "root": "/opt/git/sigmond",
   "signatures": {
     "ka9q.compat:KA9Q_RADIO_COMMIT": null,
-    "ka9q.control:CMD": null,
     "ka9q.control:RadiodControl": "(status_address: str, max_commands_per_sec: int = 100, interface: Optional[str] = None, client_id: Optional[str] = None)",
-    "ka9q.control:encode_double": "(buf: bytearray, type_val: int, x: float) -> int",
-    "ka9q.control:encode_eol": "(buf: bytearray) -> int",
-    "ka9q.control:encode_int": "(buf: bytearray, type_val: int, x: int) -> int",
     "ka9q.discovery:ChannelInfo": "(ssrc: int, preset: str, sample_rate: int, frequency: float, snr: float, multicast_address: str, port: int, gps_time: Optional[int] = None, rtp_timesnap: Optional[int] = None, encoding: int = 0, chain_delay_correction_ns: Optional[int] = None, anchor_epoch: int = 0, last_offset_step_sec: Optional[float] = None, anchor_step_threshold_sec: float = 0.75) -> None",
     "ka9q.discovery:discover_channels": "(status_address: str, listen_duration: float = 2.0, use_native: bool = True, interface: Optional[str] = None) -> Dict[int, ka9q.discovery.ChannelInfo]",
     "ka9q.discovery:discover_radiod_services": "(timeout: float = 10.0)",
     "ka9q.rtp_recorder:BILLION": null,
     "ka9q.rtp_recorder:GPS_LEAP_SECONDS": null,
     "ka9q.rtp_recorder:GPS_UTC_OFFSET": null,
-    "ka9q.rtp_recorder:rtp_to_wallclock": "(rtp_timestamp: int, channel: ka9q.discovery.ChannelInfo, wallclock_hint_sec: Optional[float] = None) -> Optional[float]",
+    "ka9q.rtp_recorder:rtp_to_utc": "(rtp_timestamp: int, channel: ka9q.discovery.ChannelInfo, wallclock_hint_sec: Optional[float] = None) -> Optional[float]",
     "ka9q.status_listener:StatusListener": "(status_address: 'str', interface: 'Optional[str]' = None, status_port: 'int' = 5006, socket_timeout: 'float' = 0.5)",
     "ka9q.stream:RadiodStream": "(channel: ka9q.discovery.ChannelInfo, on_samples: Optional[Callable[[numpy.ndarray, ka9q.stream_quality.StreamQuality], NoneType]] = None, samples_per_packet: int = 320, resequence_buffer_size: int = 64, deliver_interval_packets: int = 10)",
-    "ka9q.types:StatusType": "()",
     "ka9q.utils:resolve_multicast_address": "(address: str, timeout: float = 5.0) -> str",
     "ka9q:ChannelInfo": "(ssrc: int, preset: str, sample_rate: int, frequency: float, snr: float, multicast_address: str, port: int, gps_time: Optional[int] = None, rtp_timesnap: Optional[int] = None, encoding: int = 0, chain_delay_correction_ns: Optional[int] = None, anchor_epoch: int = 0, last_offset_step_sec: Optional[float] = None, anchor_step_threshold_sec: float = 0.75) -> None",
     "ka9q:Encoding": "()",
@@ -161,6 +153,7 @@
     "ka9q:RadiodControl": "(status_address: str, max_commands_per_sec: int = 100, interface: Optional[str] = None, client_id: Optional[str] = None)",
     "ka9q:RadiodStream": "(channel: ka9q.discovery.ChannelInfo, on_samples: Optional[Callable[[numpy.ndarray, ka9q.stream_quality.StreamQuality], NoneType]] = None, samples_per_packet: int = 320, resequence_buffer_size: int = 64, deliver_interval_packets: int = 10)",
     "ka9q:SlotClock": "(cadence_sec: 'float', sample_rate: 'int', settle_sec: 'float' = 1.5) -> 'None'",
+    "ka9q:SlotClockDesyncError": null,
     "ka9q:StreamQuality": "(batch_start_sample: int = 0, batch_samples_delivered: int = 0, batch_gaps: List[ka9q.stream_quality.GapEvent] = <factory>, total_samples_delivered: int = 0, total_samples_expected: int = 0, total_gaps_filled: int = 0, total_gap_events: int = 0, rtp_packets_received: int = 0, rtp_packets_expected: int = 0, rtp_packets_lost: int = 0, rtp_packets_late: int = 0, rtp_packets_duplicate: int = 0, rtp_packets_resequenced: int = 0, stream_start_utc: str = '', last_packet_utc: str = '', first_rtp_timestamp: int = 0, last_rtp_timestamp: int = 0, delivered_rtp_start: object = None, sample_rate: int = 0) -> None",
     "ka9q:discover_channels": "(status_address: str, listen_duration: float = 2.0, use_native: bool = True, interface: Optional[str] = None) -> Dict[int, ka9q.discovery.ChannelInfo]",
     "ka9q:parse_rtp_header": "(data: bytes) -> Optional[ka9q.rtp_recorder.RTPHeader]",

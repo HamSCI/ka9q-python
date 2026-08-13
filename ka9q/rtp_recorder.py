@@ -16,6 +16,7 @@ import socket
 import struct
 import logging
 import time
+import warnings
 from enum import Enum
 from typing import Optional, Callable, NamedTuple, Dict, Any
 from dataclasses import dataclass
@@ -242,9 +243,24 @@ def rtp_to_utc(
     return wall_time_ns / BILLION
 
 
-# Deprecated alias — kept so existing callers keep working.  Prefer
-# ``rtp_to_utc`` (the reference is RTP/GPS, not the host wall clock).
-rtp_to_wallclock = rtp_to_utc
+def rtp_to_wallclock(
+    rtp_timestamp: int,
+    channel: ChannelInfo,
+    wallclock_hint_sec: Optional[float] = None,
+) -> Optional[float]:
+    """Deprecated alias for :func:`rtp_to_utc` (renamed 2026-06-27).
+
+    Identical signature and behavior.  Emits ``DeprecationWarning`` on
+    every call (audit finding F16) — the in-tree sigmond clients migrated
+    2026-08; this is the visible signal for any remaining callers.
+    """
+    warnings.warn(
+        "ka9q rtp_to_wallclock() is deprecated; use rtp_to_utc() "
+        "(same signature and behavior, renamed 2026-06-27)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return rtp_to_utc(rtp_timestamp, channel, wallclock_hint_sec)
 
 
 class RTPRecorder:
@@ -479,7 +495,7 @@ class RTPRecorder:
                 payload = data[header_len:]
                 
                 # Compute wall-clock time
-                wallclock = rtp_to_wallclock(header.timestamp, self.channel)
+                wallclock = rtp_to_utc(header.timestamp, self.channel)
                 
                 # Call packet callback
                 if self.on_packet:

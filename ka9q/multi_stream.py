@@ -52,7 +52,7 @@ import numpy as np
 
 from .discovery import ChannelInfo
 from .resequencer import PacketResequencer, RTPPacket
-from .rtp_recorder import RTPHeader, parse_rtp_header, rtp_to_wallclock
+from .rtp_recorder import RTPHeader, parse_rtp_header, rtp_to_utc
 from .stream import ENCODING_SAMPLE_BYTES, SampleCallback, parse_rtp_samples
 from .stream_quality import GapEvent, GapSource, StreamQuality
 
@@ -512,7 +512,7 @@ class MultiStream:
                 continue
 
             # Wallclock
-            wallclock = rtp_to_wallclock(header.timestamp, slot.channel_info)
+            wallclock = rtp_to_utc(header.timestamp, slot.channel_info)
 
             # Resequencer
             packet = RTPPacket(

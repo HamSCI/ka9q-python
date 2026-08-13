@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Deprecated
+
+- **`rtp_to_wallclock()` now emits `DeprecationWarning` on every call**
+  (audit F16, completing the 2026-06-27 rename). Signature and behavior
+  are unchanged — it delegates to `rtp_to_utc()`. The in-tree clients
+  (hf-timestd, wspr-recorder) migrated to `rtp_to_utc` before this
+  landed; internal callers (`RadiodStream`, `MultiStream`, `RTPRecorder`)
+  were migrated in the same commit so the library never warns about
+  itself on the per-packet path.
+
 ## 3.22.0 (2026-08-13)
 
 Audit remediation follow-up (findings F1, F3-F8, F10-F14 from the

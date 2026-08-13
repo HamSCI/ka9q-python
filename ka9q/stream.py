@@ -38,7 +38,7 @@ from typing import Optional, Callable, List
 
 from ._multicast import join_multicast_all_interfaces
 from .discovery import ChannelInfo
-from .rtp_recorder import RTPHeader, parse_rtp_header, rtp_to_wallclock
+from .rtp_recorder import RTPHeader, parse_rtp_header, rtp_to_utc
 from .resequencer import PacketResequencer, RTPPacket
 from .stream_quality import GapSource, GapEvent, StreamQuality
 from .types import Encoding
@@ -587,7 +587,7 @@ class RadiodStream:
             return
         
         # Get wallclock time
-        wallclock = rtp_to_wallclock(header.timestamp, self.channel)
+        wallclock = rtp_to_utc(header.timestamp, self.channel)
         
         # Create packet for resequencer
         packet = RTPPacket(
