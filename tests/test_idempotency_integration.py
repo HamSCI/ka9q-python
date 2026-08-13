@@ -52,7 +52,16 @@ def _lan_ip():
 
 @pytest.fixture(scope="session")
 def lan_ip():
-    return _lan_ip()
+    if os.environ.get("SKIP_INTEGRATION"):
+        pytest.skip("SKIP_INTEGRATION set")
+    # A host with no default route (e.g. a sandboxed CI runner) raises
+    # OSError out of connect() rather than yielding a source address; treat
+    # that the same as "no usable network for this integration test" --
+    # skip, don't error the fixture.
+    try:
+        return _lan_ip()
+    except OSError as exc:
+        pytest.skip(f"no LAN route available: {exc}")
 
 
 @pytest.fixture(scope="session")
@@ -121,8 +130,13 @@ def channel(control, reachable_destination):
 
     def make(ssrc, **kwargs):
         kwargs.setdefault("destination", reachable_destination)
-        control.create_channel(FREQ, ssrc=ssrc, **kwargs)
+        # Record the SSRC before calling create_channel: create_channel
+        # issues two UDP sends, and an exception between them (or after
+        # the first but before the second) must still be torn down below.
+        # remove_channel on an SSRC that was never actually created is
+        # already tolerated by the teardown loop's try/except.
         created.append(ssrc)
+        control.create_channel(FREQ, ssrc=ssrc, **kwargs)
         return ssrc
 
     yield make
