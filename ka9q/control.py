@@ -2230,30 +2230,21 @@ class RadiodControl:
         return n
 
     def _get_or_create_status_listener(self):
+        """Removed: the cached status socket leaked.
+
+        It stayed joined to radiod's status group and unread between polls,
+        so the kernel queued the continuous status broadcast into it until
+        the receive buffer capped and every further packet was discarded --
+        1,254,234 of them on B4, ~24/s, with the queue permanently full.
+        Draining at poll time did not help, because in steady state nothing
+        polls. Each exchange now creates and closes its own socket via
+        `_setup_status_listener`; `close()` still tolerates the old
+        attribute so existing callers are unaffected.
         """
-        Get cached status listener socket or create new one if needed.
-        
-        This method implements socket reuse to avoid creating/destroying sockets
-        on every tune() call, which saves 20-30ms per operation and prevents
-        socket exhaustion.
-        
-        Returns:
-            Cached or newly created status listener socket
-        """
-        import threading
-        
-        # Lazy initialization of lock (avoid threading overhead if never used)
-        if self._status_sock_lock is None:
-            self._status_sock_lock = threading.Lock()
-        
-        with self._status_sock_lock:
-            if self._status_sock is None:
-                logger.debug("Creating cached status listener socket")
-                self._status_sock = self._setup_status_listener()
-            else:
-                logger.debug("Reusing cached status listener socket")
-            return self._status_sock
-    
+        raise NotImplementedError(
+            "the cached status socket was removed (it leaked); call "
+            "_setup_status_listener() per exchange and close it")
+
     def tune(self, ssrc: int, frequency_hz: Optional[float] = None,
              preset: Optional[str] = None, sample_rate: Optional[int] = None,
              low_edge: Optional[float] = None, high_edge: Optional[float] = None,
@@ -2393,9 +2384,12 @@ class RadiodControl:
 
         encode_eol(cmdbuffer)
         
-        # Get cached status listener (or create if first use)
-        # Socket is reused across tune() calls to avoid creation/destruction overhead
-        status_sock = self._get_or_create_status_listener()
+        # One socket per exchange (see poll_status for why caching it leaked).
+        # The old comment claimed reuse avoided creation overhead; the cost it
+        # actually avoided was ~1 ms of setup per tune, against a socket that
+        # stayed joined to the status group for the process lifetime and
+        # queued the whole broadcast into a buffer nobody read.
+        status_sock = self._setup_status_listener()
         # Same request/response contract as poll_status: only packets that
         # arrive after the tune command can be its reply, and wading through
         # a full buffer's worth of stale ones eats the timeout.
@@ -2456,9 +2450,10 @@ class RadiodControl:
             raise TimeoutError(f"No status response received for SSRC {ssrc} within {timeout}s")
         
         finally:
-            # NOTE: Do NOT close status_sock here - it's cached for reuse
-            # Socket will be closed in close() method
-            pass
+            try:
+                status_sock.close()
+            except OSError:
+                pass
     
     def _decode_status_response(self, buffer: bytes) -> dict:
         """
@@ -3389,32 +3384,44 @@ class RadiodControl:
         encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
         encode_eol(cmdbuffer)
 
-        status_sock = self._get_or_create_status_listener()
-        # Only traffic that arrives AFTER the command can be its reply.
-        self._drain_status_socket(status_sock)
-        start = _time.time()
-        last_send = 0.0
-        retry = 0.1
-        while _time.time() - start < timeout:
-            now = _time.time()
-            if now - last_send >= retry:
-                self.send_command(cmdbuffer)
-                last_send = now
-                retry = min(retry * 2, 1.0)
-            remaining = timeout - (now - start)
-            ready = select.select([status_sock], [], [], min(retry, remaining, 0.5))
-            if not ready[0]:
-                continue
+        # One socket per exchange, closed on the way out. Caching it for
+        # the process lifetime left it joined to the status group and
+        # unread between polls, so the kernel queued radiod's continuous
+        # broadcast into it until the buffer capped: on B4 that socket sat
+        # permanently full having discarded 1.25M packets. Draining at poll
+        # time cannot fix that, because in steady state nothing polls.
+        status_sock = self._setup_status_listener()
+        try:
+            # Only traffic that arrives AFTER the command can be its reply.
+            self._drain_status_socket(status_sock)
+            start = _time.time()
+            last_send = 0.0
+            retry = 0.1
+            while _time.time() - start < timeout:
+                now = _time.time()
+                if now - last_send >= retry:
+                    self.send_command(cmdbuffer)
+                    last_send = now
+                    retry = min(retry * 2, 1.0)
+                remaining = timeout - (now - start)
+                ready = select.select([status_sock], [], [], min(retry, remaining, 0.5))
+                if not ready[0]:
+                    continue
+                try:
+                    buf, _addr = status_sock.recvfrom(8192)
+                except socket.timeout:
+                    continue
+                st = decode_status_packet(buf)
+                if st is None:
+                    continue
+                if st.ssrc == ssrc and st.command_tag == command_tag:
+                    return st
+            raise TimeoutError(f"No status response received for SSRC {ssrc} within {timeout}s")
+        finally:
             try:
-                buf, _addr = status_sock.recvfrom(8192)
-            except socket.timeout:
-                continue
-            st = decode_status_packet(buf)
-            if st is None:
-                continue
-            if st.ssrc == ssrc and st.command_tag == command_tag:
-                return st
-        raise TimeoutError(f"No status response received for SSRC {ssrc} within {timeout}s")
+                status_sock.close()
+            except OSError:
+                pass
 
     def listen_status(self, callback, duration: Optional[float] = None,
                       ssrcs: Optional[set] = None):
@@ -3429,28 +3436,38 @@ class RadiodControl:
         import time as _time
         from .status import decode_status_packet
 
-        status_sock = self._get_or_create_status_listener()
-        start = _time.time()
-        while True:
-            if duration is not None and _time.time() - start >= duration:
-                return
-            remaining = None if duration is None else max(0.0, duration - (_time.time() - start))
-            ready = select.select([status_sock], [], [], 0.5 if remaining is None else min(0.5, remaining))
-            if not ready[0]:
-                continue
+        # Passive listener: its own socket for the life of the call, then
+        # closed. Unlike the request/response paths this one is read
+        # continuously, so it never accumulates -- but it must not share a
+        # cached socket that outlives the call either.
+        status_sock = self._setup_status_listener()
+        try:
+            start = _time.time()
+            while True:
+                if duration is not None and _time.time() - start >= duration:
+                    return
+                remaining = None if duration is None else max(0.0, duration - (_time.time() - start))
+                ready = select.select([status_sock], [], [], 0.5 if remaining is None else min(0.5, remaining))
+                if not ready[0]:
+                    continue
+                try:
+                    buf, _addr = status_sock.recvfrom(8192)
+                except socket.timeout:
+                    continue
+                st = decode_status_packet(buf)
+                if st is None or st.ssrc is None:
+                    continue
+                if ssrcs is not None and st.ssrc not in ssrcs:
+                    continue
+                try:
+                    callback(st)
+                except Exception as exc:
+                    logger.warning(f"listen_status callback raised: {exc}")
+        finally:
             try:
-                buf, _addr = status_sock.recvfrom(8192)
-            except socket.timeout:
-                continue
-            st = decode_status_packet(buf)
-            if st is None or st.ssrc is None:
-                continue
-            if ssrcs is not None and st.ssrc not in ssrcs:
-                continue
-            try:
-                callback(st)
-            except Exception as exc:
-                logger.warning(f"listen_status callback raised: {exc}")
+                status_sock.close()
+            except OSError:
+                pass
 
     # ── Continuous STATUS listener (v3.16.0+) ──────────────────────
 

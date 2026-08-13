@@ -107,3 +107,49 @@ def test_drain_restores_blocking_state_even_when_recv_raises():
     RadiodControl._drain_status_socket(sock)
     sock.setblocking.assert_any_call(True)
     sock.settimeout.assert_any_call(0.1)
+
+
+# ── socket lifecycle ────────────────────────────────────────────────────
+# The drain above is necessary but was never sufficient. It runs inside a
+# poll, and in steady state nothing polls: on B4 the cached socket stayed
+# joined to the status group, unread, and the kernel queued radiod's
+# continuous broadcast into it until the buffer capped. Each exchange now
+# owns its socket and closes it.
+
+def test_cached_accessor_is_retired():
+    """It must fail loudly rather than quietly hand back a leaking socket."""
+    import pytest as _pytest
+    c = RadiodControl.__new__(RadiodControl)
+    with _pytest.raises(NotImplementedError, match="leaked"):
+        c._get_or_create_status_listener()
+
+
+def test_every_exchange_closes_its_socket():
+    """tune, poll_status and listen_status must each close what they open.
+
+    Asserted against the source rather than by driving a live radiod: the
+    property is structural -- a socket created per exchange and closed in a
+    finally -- and a leak reappears as an unbalanced pair, which is exactly
+    what this counts.
+    """
+    import inspect
+    from ka9q import control as mod
+
+    src = inspect.getsource(mod)
+    opens = src.count("self._setup_status_listener()")
+    closes = src.count("status_sock.close()")
+    assert opens == 3, f"expected tune/poll_status/listen_status, found {opens}"
+    assert closes >= opens, f"{opens} sockets opened, only {closes} closed"
+
+
+def test_no_status_socket_survives_an_exchange():
+    """The regression, stated directly: nothing may hold a status socket
+    open past the call that made it."""
+    import inspect
+    from ka9q import control as mod
+
+    for name in ("tune", "poll_status", "listen_status"):
+        fn_src = inspect.getsource(getattr(mod.RadiodControl, name))
+        assert "_setup_status_listener()" in fn_src, f"{name} does not open its own"
+        assert "status_sock.close()" in fn_src, f"{name} never closes it"
+        assert "finally:" in fn_src, f"{name} does not close on the error path"

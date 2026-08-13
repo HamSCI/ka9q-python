@@ -120,7 +120,13 @@ class TestTuneLifetime:
         control.send_command = MagicMock(side_effect=side_effect)
         # Listener returns a MagicMock — tune() never gets to call select()
         # because send_command raises first.
-        control._get_or_create_status_listener = MagicMock(return_value=MagicMock())
+        # Per-exchange socket now (the cached one leaked). recv() raising
+        # BlockingIOError is an empty queue, so the pre-poll drain returns
+        # at once instead of spinning to its bound against a mock.
+        _sock = MagicMock()
+        _sock.recv.side_effect = BlockingIOError
+        control._setup_status_listener = MagicMock(return_value=_sock)
+
 
     def test_lifetime_appears_when_passed(self):
         """tune(lifetime=N) should include LIFETIME in the command buffer."""
