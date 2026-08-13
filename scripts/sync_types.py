@@ -60,7 +60,7 @@ def parse_c_enum(header_text: str, enum_name: str) -> List[Tuple[str, int, str]]
 
         # Match:  NAME,  NAME = 3,  NAME = 3, // comment   NAME, // comment
         m = re.match(
-            r"([A-Z][A-Z0-9_]*)\s*(?:=\s*(\d+))?\s*,?\s*(?://\s*(.*))?\s*$",
+            r"([A-Z][A-Z0-9_]*)\s*(?:=\s*(-?\d+))?\s*,?\s*(?://\s*(.*))?\s*$",
             line,
         )
         if not m:
