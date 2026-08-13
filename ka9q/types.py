@@ -162,6 +162,7 @@ class Encoding:
 class DemodType:
     """Demodulator types — values must match ka9q-radio/src/radio.h enum demod_type"""
 
+    INVALID_DEMOD = -1  # used as sentinel
     LINEAR_DEMOD = 0  # Linear demodulation, i.e., everything else: SSB, CW, DSB, CAM, IQ
     FM_DEMOD = 1  # Frequency/phase demodulation
     WFM_DEMOD = 2  # wideband frequency modulation (broadcast stereo)
