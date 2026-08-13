@@ -22,7 +22,7 @@
 
 ### Task 1: F1 (P0) — MultiStream restore must re-send every creation-time setting
 
-`MultiStream._attempt_restore()` calls `ensure_channel()` with only 5 of the 10 identity/config fields captured at `add_channel()`. `agc_enable`/`gain` feed `allocate_ssrc()`'s hash, so a restore of a channel created with non-default gain/AGC computes a **different SSRC** — silent channel-identity change on the recovery path every major client relies on. Fix mirrors the `731ce5e` lifetime/encoding pattern: store in `_ChannelSlot`, thread through restore. Two deliberate extensions of the same bug class, both in the restore call only: (a) restore re-sends `slot.requested_encoding` (what creation sent) instead of `slot.encoding` (what radiod granted) — otherwise a radiod F32→S16 downgrade at creation makes the restore hash a different SSRC too; (b) after restore, `slot.encoding` is re-resolved from the newly granted `channel_info`, the same authority rule `add_channel()` already applies (prevents NaN-poisoned decode after a restore that re-grants a different encoding).
+`MultiStream._attempt_restore()` calls `ensure_channel()` with only 5 of the 10 identity/config fields captured at `add_channel()`. `agc_enable`/`gain` feed `allocate_ssrc()`'s hash, so a restore of a channel created with non-default gain/AGC computes a **different SSRC** — silent channel-identity change on the recovery path every major client relies on. Fix mirrors the `731ce5e` lifetime/encoding pattern: store in `_ChannelSlot`, thread through restore. Two deliberate extensions of the same bug class, both in the restore call only: (a) restore re-sends `slot.requested_encoding` (what creation sent) instead of `slot.encoding` (what radiod granted) — otherwise a radiod F32→S16 downgrade at creation makes the restore hash a different SSRC too; (b) after restore, `slot.encoding` is re-resolved from the newly granted `channel_info`, the same authority rule `add_channel()` already applies (prevents NaN-poisoned decode after a restore that re-grants a different encoding). Owner's contract for this task (Checkpoint review, 2026-08-13): **the original requested channel requires full specification — restore must replay the complete original requested spec, never a partial one.**
 
 **Files:**
 - Create: `tests/test_multistream_restore.py`
@@ -294,34 +294,41 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 3: F5 — fail loudly when no destination can be resolved
+### Task 3: F5 — derive per-client destination; fail loudly only when underivable
 
-Empirically proven (idempotency.md Round 2, "Second requirement found"): on both b1 and b2, `create_channel()` without `destination=` produces **no error and no channel** — the docstring's "uses radiod's config-file default" fallback does not exist client-side, and the only symptom is a later timeout that doesn't name the cause. Approved remediation: raise `ValidationError`.
+Empirically proven (idempotency.md Round 2, "Second requirement found"): on both b1 and b2, a create command without an `OUTPUT_DATA_DEST_SOCKET` TLV produces **no error and no channel** — the docstring's "uses radiod's config-file default" fallback does not exist client-side, and the only symptom is a later timeout that doesn't name the cause.
 
-**Caller audit (required by scope), performed 2026-08-13:**
-- `ensure_channel()` (control.py:1867) is the **only** in-library caller of `create_channel()`, and it may pass `destination=None` when the `RadiodControl` has no `client_id`. Handled below: `ensure_channel()` raises its own earlier, clearer `ValidationError` (naming the `client_id=` alternative) when neither is available, so the `create_channel` guard is never hit from that path with a confusing message.
-- `ManagedStream` always forwards its `destination` parameter (managed_stream.py:237, 420) — callers passing neither `destination=` nor using `client_id` now fail fast at `start()` instead of silently creating nothing.
-- `MultiStream.add_channel` (multi_stream.py:199) has **no destination parameter** and always passes `destination=None` implicitly — MultiStream therefore *requires* a `client_id`-bearing `RadiodControl`. This is already production reality: hf-timestd, wspr-recorder and psk-recorder all construct `RadiodControl(..., client_id=...)` (verified by grep in the read-only client checkouts), and the audit found no client omitting both. Documented in the docstring below.
-- `ChannelMonitor` (monitor.py:90, 147) forwards `**kwargs` — same fail-fast inheritance as ManagedStream.
+**Owner's ruling (Checkpoint review, 2026-08-13):** the SUPPORTED model is a per-client unique destination derived by ka9q-python ("destination unique for a client among others") — exactly what `ensure_channel` already does via `generate_multicast_ip(unique_id=self.client_id, radiod_host=self.status_address)` (control.py:1771–1778). Explicit `destination=` is the DEPRECATED/legacy path: it keeps working and wins over derivation (operator override), but is documented as legacy. Therefore: `create_channel` gains the **same** derivation, extracted into a shared `_derive_client_destination()` helper so the two paths cannot drift; a create command is **never** sent without a destination TLV; and `ValidationError` is raised only when *neither* `client_id` nor `destination=` is available. **No runtime `DeprecationWarning` for explicit `destination=`** — hf-timestd passes resolved destinations on two production paths (`channel_manager.py:137`, `stream_manager.py:138`) and must not be warning-spammed; the deprecation lives in docstrings only. Recorded here so the decision is on the record.
+
+**Caller audit (performed 2026-08-13, updated for the derive-first model):**
+- `ensure_channel()` (control.py:1867) is the **only** in-library caller of `create_channel()`. It keeps its derivation (now via the shared helper) and raises the same-shaped `ValidationError` when underivable, so `create_channel`'s guard is unreachable from that path.
+- `ManagedStream` forwards its `destination` parameter (managed_stream.py:237, 420); when it is `None`, derivation from the control's `client_id` applies — callers with neither now fail fast at `start()` instead of silently creating nothing.
+- `MultiStream.add_channel` (multi_stream.py:199) has **no destination parameter** — MultiStream therefore requires a `client_id`-bearing `RadiodControl` (the supported model). Already production reality: hf-timestd, wspr-recorder and psk-recorder all construct `RadiodControl(..., client_id=...)` (verified by grep in the read-only client checkouts). Documented in the docstring below.
+- `ChannelMonitor` (monitor.py:90, 147) forwards `**kwargs` — same inheritance as ManagedStream.
+
+**Behavior note:** for a `client_id`-bearing control calling `create_channel()` directly with no `destination=` and no `ssrc=`, the derived destination now participates in `allocate_ssrc()`'s hash (previously `None` did) — this *aligns* direct-create SSRCs with `ensure_channel`'s (which always derived before allocating), and the audit found no client on that direct-create-no-destination path.
 
 **Files:**
 - Create: `tests/test_destination_required.py`
-- Modify: `ka9q/control.py` (`create_channel` guard + docstring; `ensure_channel` guard + docstring)
+- Modify: `ka9q/control.py` (new `_derive_client_destination()`; `create_channel` guard + docstring; `ensure_channel` guard + docstring; `RadiodControl.__init__` docstring)
 - Modify: `ka9q/multi_stream.py` (`add_channel` docstring note)
 - Modify: `ka9q/__init__.py` (module docstring example)
-- Modify: `tests/test_create_split_encoding.py`, `tests/test_lifetime.py`, `tests/test_remove_channel.py`, `tests/test_filter_edges.py`, `tests/test_ensure_channel_encoding.py` (add `destination=` at call sites)
-- Modify: `examples/*.py` (add `destination=` at call sites; not suite-gating)
+- Modify: `tests/test_create_split_encoding.py`, `tests/test_lifetime.py`, `tests/test_remove_channel.py`, `tests/test_filter_edges.py`, `tests/test_ensure_channel_encoding.py` (call-site updates, see Step 5)
+- Modify: `examples/*.py` (add `client_id=` at constructions; not suite-gating)
 
 - [ ] **Step 1: Write the failing tests**
 
 `tests/test_destination_required.py`:
 
 ```python
-"""create_channel()/ensure_channel() must fail loudly when no destination
-can be resolved (audit F5): on the audited deployments an omitted
-OUTPUT_DATA_DEST_SOCKET TLV silently creates nothing — no error, no
-channel, only a later poll/ensure timeout that doesn't name the cause
-(idempotency.md Round 2, "Second requirement found")."""
+"""Destination resolution for channel creation (audit F5, owner-ruled model).
+
+Empirically (idempotency.md Round 2, "Second requirement found") an omitted
+OUTPUT_DATA_DEST_SOCKET TLV silently creates nothing.  The supported model
+is a per-client destination derived from client_id (same derivation in
+create_channel and ensure_channel via _derive_client_destination());
+explicit destination= is the legacy path and keeps working.  Creation
+fails loudly only when NEITHER is available."""
 
 import threading
 import time
@@ -329,7 +336,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ka9q.control import RadiodControl
+from ka9q.addressing import generate_multicast_ip
+from ka9q.control import RadiodControl, StatusType
 from ka9q.exceptions import ValidationError
 
 
@@ -349,30 +357,94 @@ def _bare_control(client_id=None) -> RadiodControl:
     return c
 
 
-def test_create_channel_requires_destination():
-    c = _bare_control()
+def _capture_send(control):
+    sent = []
+    control.send_command = MagicMock(
+        side_effect=lambda buf: sent.append(bytes(buf)))
+    return sent
+
+
+def _has_tag(buf: bytes, tag: int) -> bool:
+    """TLV walker (same as tests/test_filter_edges.py)."""
+    cp = 1
+    while cp < len(buf):
+        t = buf[cp]
+        cp += 1
+        if t == StatusType.EOL:
+            break
+        if cp >= len(buf):
+            break
+        optlen = buf[cp]
+        cp += 1
+        if optlen & 0x80:
+            n = optlen & 0x7F
+            optlen = 0
+            for _ in range(n):
+                if cp >= len(buf):
+                    return False
+                optlen = (optlen << 8) | buf[cp]
+                cp += 1
+        if t == tag:
+            return True
+        cp += optlen
+    return False
+
+
+def test_create_channel_underivable_raises():
+    c = _bare_control(client_id=None)
     c.send_command = MagicMock()
     with pytest.raises(ValidationError, match="destination"):
         c.create_channel(frequency_hz=14_074_000.0, ssrc=12345)
     c.send_command.assert_not_called()   # fail BEFORE any bytes hit the wire
 
 
-def test_ensure_channel_requires_destination_or_client_id():
+def test_create_channel_derives_destination_from_client_id():
+    c = _bare_control(client_id="unit-test")
+    sent = _capture_send(c)
+    c.create_channel(frequency_hz=14_074_000.0, ssrc=12345)
+    assert sent, "create_channel sent nothing"
+    assert _has_tag(sent[0], StatusType.OUTPUT_DATA_DEST_SOCKET), (
+        "derived destination must be encoded — radiod silently creates "
+        "nothing without the destination TLV")
+
+
+def test_explicit_destination_still_works_legacy():
+    c = _bare_control(client_id=None)
+    sent = _capture_send(c)
+    c.create_channel(frequency_hz=14_074_000.0, ssrc=12345,
+                     destination="239.9.8.7")
+    assert _has_tag(sent[0], StatusType.OUTPUT_DATA_DEST_SOCKET)
+
+
+def test_create_and_ensure_derive_identical_destination():
+    """Locks the shared-helper invariant: create_channel and ensure_channel
+    must derive the SAME per-(client, radiod) group, so the two paths can
+    never drift apart again."""
+    expected = generate_multicast_ip(unique_id="unit-test",
+                                     radiod_host="test.local")
+    c = _bare_control(client_id="unit-test")
+    assert c._derive_client_destination() == expected
+
+
+def test_ensure_channel_underivable_raises():
     c = _bare_control(client_id=None)
     with pytest.raises(ValidationError, match="destination"):
         c.ensure_channel(frequency_hz=14_074_000.0, preset="iq",
                          sample_rate=16000)
 
 
-def test_ensure_channel_derives_destination_from_client_id():
-    # client_id present -> a destination is derived and the guard does not
-    # fire; poll/create are mocked so no network is touched.
+def test_ensure_channel_derives_and_reuses_matching_channel():
+    # The derived destination must reach the reuse comparison: an existing
+    # channel on exactly the derived group is reused, create_channel is
+    # never called, and the guard does not fire.
     from ka9q.discovery import ChannelInfo
+    derived = generate_multicast_ip(unique_id="unit-test",
+                                    radiod_host="test.local")
     c = _bare_control(client_id="unit-test")
     c.create_channel = MagicMock()
     ch = ChannelInfo(ssrc=1, preset="iq", sample_rate=16000,
                      frequency=14_074_000.0, snr=0.0,
-                     multicast_address="239.1.2.3", port=5004)
+                     multicast_address=derived, port=5004)
 
     def poll(ssrc, *a, **k):
         ch.ssrc = ssrc
@@ -381,6 +453,7 @@ def test_ensure_channel_derives_destination_from_client_id():
     c.poll_channel = MagicMock(side_effect=poll)
     c.ensure_channel(frequency_hz=14_074_000.0, preset="iq",
                      sample_rate=16000)  # must not raise
+    c.create_channel.assert_not_called()
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -388,66 +461,140 @@ def test_ensure_channel_derives_destination_from_client_id():
 ```bash
 uv run pytest tests/test_destination_required.py -v
 ```
-Expected: the first two tests fail (no exception raised today); the third passes.
+Expected: `test_create_channel_underivable_raises`, `test_create_channel_derives_destination_from_client_id`, `test_create_and_ensure_derive_identical_destination` (`AttributeError: ... no attribute '_derive_client_destination'`) and `test_ensure_channel_underivable_raises` fail; the legacy-path and reuse tests pass.
 
-- [ ] **Step 3: Implement the guards**
+- [ ] **Step 3: Implement the shared helper and both guards**
 
-`create_channel()` — insert as the **first** statements of the method body (before SSRC auto-allocation, so a `None` destination never participates in the SSRC hash):
+Add to `RadiodControl` immediately before `create_channel()` (~line 1275):
 
 ```python
+    def _derive_client_destination(self) -> Optional[str]:
+        """Derive the per-client destination multicast group, or None.
+
+        CONTRACT v0.3 §7: when this RadiodControl was constructed with a
+        client_id, channel destinations default to a deterministic
+        per-(client, radiod) multicast group — unique for this client
+        among others on the station — so peer clients land on distinct
+        groups without per-client derivation code.  Shared by
+        create_channel() and ensure_channel() so the two derivations can
+        never drift apart (audit finding F5, owner ruling 2026-08-13).
+        """
+        if not self.client_id:
+            return None
+        from .addressing import generate_multicast_ip
+        return generate_multicast_ip(
+            unique_id=self.client_id,
+            radiod_host=self.status_address,
+        )
+```
+
+`create_channel()` — insert as the **first** statements of the method body (before SSRC auto-allocation, so the resolved destination participates in the SSRC hash, matching ensure_channel):
+
+```python
+        # Destination resolution (audit F5): explicit destination= (legacy)
+        # wins; otherwise derive the per-client group from client_id
+        # (supported model); otherwise fail loudly — radiod silently creates
+        # NO channel when the OUTPUT_DATA_DEST_SOCKET TLV is omitted (no
+        # error, no visible SSRC, only a later poll/ensure timeout).  A
+        # create command is never sent without a destination TLV.
+        if destination is None:
+            destination = self._derive_client_destination()
+            if destination is not None:
+                logger.debug(
+                    "create_channel: derived destination=%s for client_id=%r "
+                    "radiod=%r", destination, self.client_id,
+                    self.status_address,
+                )
         if destination is None:
             raise ValidationError(
-                "create_channel() requires destination=. The previously "
-                "documented 'radiod config-file default' fallback does not "
-                "exist client-side: on audited deployments an omitted "
-                "destination silently creates NO channel — no error, no "
-                "visible SSRC, only a later poll/ensure timeout (audit "
-                "finding F5). Pass destination='239.x.y.z[:port]' naming a "
-                "multicast group this radiod is configured to output on, or "
-                "use ensure_channel() on a RadiodControl constructed with "
-                "client_id= to have one derived."
+                "create_channel() could not resolve a destination, and radiod "
+                "silently creates NO channel when the OUTPUT_DATA_DEST_SOCKET "
+                "TLV is omitted (audit finding F5). Construct "
+                "RadiodControl(..., client_id=...) so a deterministic "
+                "per-client destination is derived (supported model), or pass "
+                "destination='239.x.y.z[:port]' explicitly (legacy)."
             )
 ```
 
-`ensure_channel()` — insert immediately **after** the existing `client_id` derivation block (the `if destination is None and self.client_id:` block, ~line 1780):
+`ensure_channel()` — replace the existing derivation block (the `# CONTRACT v0.3 §7:` comment plus the `if destination is None and self.client_id:` block, ~lines 1765–1779) with:
 
 ```python
+        # Destination resolution (audit F5): explicit destination= (legacy)
+        # wins; otherwise derive the per-client group (supported model,
+        # shared with create_channel); otherwise fail loudly.
+        if destination is None:
+            destination = self._derive_client_destination()
+            if destination is not None:
+                logger.debug(
+                    "ensure_channel: derived destination=%s for client_id=%r "
+                    "radiod=%r", destination, self.client_id,
+                    self.status_address,
+                )
         if destination is None:
             raise ValidationError(
-                "ensure_channel() could not resolve a destination: pass "
-                "destination= explicitly, or construct RadiodControl with "
-                "client_id= so a deterministic per-client multicast group "
-                "is derived. Omitting both silently creates no channel on "
-                "radiod deployments without a config-file default (audit "
-                "finding F5)."
+                "ensure_channel() could not resolve a destination: construct "
+                "RadiodControl(..., client_id=...) so a deterministic "
+                "per-client destination is derived (supported model), or pass "
+                "destination= explicitly (legacy). Omitting both silently "
+                "creates no channel on radiod deployments without a "
+                "config-file default (audit finding F5)."
             )
 ```
+
+and remove the now-unused `from .addressing import generate_multicast_ip` at the top of `ensure_channel`'s body (~line 1755) — the helper does its own import; the adjacent `from .discovery import ChannelInfo, discover_channels` line stays.
 
 - [ ] **Step 4: Update the docstrings**
 
 `create_channel()` docstring, `destination:` argument (~lines 1307–1309) — replace with:
 
 ```
-            destination: RTP destination multicast address (REQUIRED).
-                        Format: "address" or "address:port"
-                        Examples: "239.1.2.3", "wspr.local", "239.1.2.3:5004"
-                        Must name a multicast group this radiod is configured
-                        to output on. Omitting it raises ValidationError: the
+            destination: RTP destination multicast address.
+                        SUPPORTED MODEL: omit this and construct
+                        RadiodControl with client_id= — ka9q-python derives
+                        a deterministic per-(client, radiod) multicast
+                        group (unique for this client among others),
+                        identical to ensure_channel's derivation.
+                        LEGACY: passing destination= explicitly still works
+                        and wins over derivation (operator override).
+                        Format "address" or "address:port" (e.g.
+                        "239.1.2.3", "wspr.local", "239.1.2.3:5004"); must
+                        name a group this radiod is configured to output
+                        on. When neither client_id nor destination is
+                        available, ValidationError is raised: the
                         previously documented "radiod config-file default"
-                        fallback does not exist client-side, and on audited
+                        fallback does not exist client-side — on audited
                         deployments an omitted destination silently created
-                        nothing (audit finding F5). Prefer ensure_channel()
-                        with a client_id-bearing RadiodControl to have a
-                        destination derived automatically.
+                        nothing (audit finding F5). A create command is
+                        never sent without a destination TLV.
 ```
 
-`ensure_channel()` docstring, precedence item (3) (~lines 1698–1701) — replace with:
+`ensure_channel()` docstring, `destination:` argument (~lines 1691–1701) — replace with:
 
 ```
-                        (3) otherwise (``destination=None`` and no
-                        ``client_id``), ValidationError is raised — there is
+            destination: RTP destination multicast address (optional).
+                        Precedence: (1) explicit ``destination=`` wins
+                        (LEGACY path / operator override); (2) otherwise if
+                        the RadiodControl was constructed with
+                        ``client_id=``, a deterministic per-(client,
+                        radiod) ``239.x.y.z`` address is derived — the
+                        SUPPORTED model, giving each peer client on a
+                        station its own multicast group (same derivation as
+                        create_channel: _derive_client_destination());
+                        (3) otherwise ValidationError is raised — there is
                         no radiod config-default fallback client-side
-                        (audit finding F5).
+                        (audit finding F5). The resolved address becomes
+                        part of the channel identity (SSRC).
+```
+
+`RadiodControl.__init__()` docstring, `client_id:` argument (~line 863) — append to its existing text:
+
+```
+                      client_id is the SUPPORTED way to obtain channel
+                      destinations: create_channel()/ensure_channel()
+                      derive a deterministic per-(client, radiod) multicast
+                      group from it whenever destination= is omitted;
+                      passing destination= explicitly is the legacy path
+                      (audit finding F5).
 ```
 
 `MultiStream.add_channel()` docstring — append this paragraph (before the `Returns:` line):
@@ -455,28 +602,31 @@ Expected: the first two tests fail (no exception raised today); the third passes
 ```
         Because add_channel has no ``destination=`` parameter, the
         RadiodControl this MultiStream wraps MUST be constructed with
-        ``client_id=`` so ensure_channel can derive a destination;
-        otherwise ensure_channel raises ValidationError (audit finding
-        F5 — an omitted destination used to silently create nothing).
+        ``client_id=`` so a per-client destination is derived (the
+        supported model); otherwise ensure_channel raises ValidationError
+        (audit finding F5 — an omitted destination used to silently
+        create nothing).
 ```
 
-`ka9q/__init__.py` module docstring, "Lower-level usage" example (~line 52) — add `destination="239.1.2.3",` to the `create_channel(...)` call. Do the same in `create_channel`'s own two docstring examples (~lines 1345 and 1353).
+`ka9q/__init__.py` module docstring, "Lower-level usage" example (~line 51): change `RadiodControl("radiod.local")` to `RadiodControl("radiod.local", client_id="my-app")` (the `create_channel` call then derives its destination — the supported model). Do the same in `create_channel`'s own two docstring examples (~lines 1343 and 1352: `RadiodControl("radiod.local")` → `RadiodControl("radiod.local", client_id="my-app")`).
 
-- [ ] **Step 5: Update the unit-test call sites that omit destination**
+Deliberately **no** `DeprecationWarning` on explicit `destination=`: hf-timestd passes resolved destinations in production (`channel_manager.py:137`, `stream_manager.py:138`) and must not be warning-spammed. Docstring-only deprecation, per owner ruling.
 
-Mechanical edits — add the kwarg shown to each listed call:
+- [ ] **Step 5: Update the unit tests whose bare controls can now neither derive nor pass a destination**
 
-- `tests/test_create_split_encoding.py` — both `control.create_channel(...)` calls (~lines 14, 24): add `destination="239.9.8.7",`
-- `tests/test_lifetime.py` — `TestCreateChannelLifetime`, both `control.create_channel(...)` calls (~lines 157, 170): add `destination="239.9.8.7",`
-- `tests/test_remove_channel.py` — `test_create_and_remove_pattern`'s `control.create_channel(...)` (~line 141): add `destination="239.9.8.7",`
-- `tests/test_filter_edges.py` — the four `create_channel(...)` calls in `TestCreateChannelFilterEdges` (~lines 90, 100, 109, 120): add `destination="239.9.8.7",`; the three `ensure_channel(...)` calls (~lines 154, 187, 220): add `destination="239.1.2.3",` (matches the mocked existing channel's `multicast_address="239.1.2.3"` so the reuse-path tests still take the reuse branch), and change any `allocate_ssrc(..., destination=None, ...)` precompute inside those same tests to `destination="239.1.2.3"` so the precomputed SSRC stays consistent.
-- `tests/test_ensure_channel_encoding.py` — both `ensure_channel(...)` calls (~lines 35, 66): add `destination="239.1.1.1",` (matches the mocked `ChannelInfo.multicast_address`). `allocate_ssrc` is patched in these tests, so the SSRC is unaffected.
+Prefer the supported model (give the test control a `client_id`) except where a test's assertions depend on a specific address (there, pass explicit `destination=` — legacy still works):
 
-(`tests/test_channel_verification.py` and `tests/test_idempotency_integration.py` already pass `destination=` — verified; no change.)
+- `tests/test_lifetime.py` — `_bare_control()` helper (~line 27): add `c.client_id = "unit-test"` (the two `create_channel` calls in `TestCreateChannelLifetime` then derive; the added `OUTPUT_DATA_DEST_SOCKET` TLV does not affect the `_has_lifetime_tag` walker assertions).
+- `tests/test_remove_channel.py` — the inline bare control in `test_create_and_remove_pattern` (~line 121): add `control.client_id = "unit-test"`.
+- `tests/test_create_split_encoding.py` — construction (~line 10): change to `RadiodControl("radiod.local", client_id="unit-test")` (send-count assertions are unaffected: the derived destination rides in the main creation packet).
+- `tests/test_filter_edges.py` — `_bare_control()` (~line 41): change `c.client_id = None` to `c.client_id = "unit-test"` (the four `create_channel` tests then derive). The three `ensure_channel` tests (~lines 154, 187, 220) mock an existing channel at `"239.1.2.3"`, so derivation would not match it: add explicit `destination="239.1.2.3",` to those three calls (legacy override wins), and change any `allocate_ssrc(..., destination=None, ...)` precompute inside those same tests to `destination="239.1.2.3"` so the precomputed SSRC stays consistent.
+- `tests/test_ensure_channel_encoding.py` — both `ensure_channel(...)` calls (~lines 35, 66): add `destination="239.1.1.1",` (matches the mocked `ChannelInfo.multicast_address`; `allocate_ssrc` is patched, so the SSRC is unaffected).
 
-- [ ] **Step 6: Update examples (docs-level; not suite-gating)**
+(`tests/test_channel_verification.py` and `tests/test_idempotency_integration.py` already pass `destination=` explicitly — legacy path, keeps working; no change. Existing tests that already pass `destination=` anywhere else likewise KEEP it.)
 
-Add `destination="239.1.2.3",` to each `create_channel(...)` call in: `examples/simple_am_radio.py` (~line 18), `examples/codar_oceanography.py` (~40), `examples/superdarn_recorder.py` (~33), `examples/channel_cleanup_example.py` (~44, 78, 117, 158, 189), `examples/hf_band_scanner.py` (~38), `examples/test_improvements.py` (each `create_channel` call, including the intentional-ValidationError ones — the destination guard runs first, so those examples must pass a destination for their ssrc/frequency errors to be the ones raised).
+- [ ] **Step 6: Update examples to the supported model (docs-level; not suite-gating)**
+
+Add `client_id="<example-name>"` to each `RadiodControl(...)` construction (the `create_channel` calls then derive their destinations): `examples/simple_am_radio.py`, `examples/codar_oceanography.py`, `examples/superdarn_recorder.py`, `examples/channel_cleanup_example.py`, `examples/hf_band_scanner.py`, `examples/test_improvements.py`. In `examples/test_improvements.py` the intentional-ValidationError calls (invalid ssrc/frequency) keep raising their intended errors — destination derivation succeeds first, then ssrc/frequency validation fires.
 
 - [ ] **Step 7: Verify**
 
@@ -485,13 +635,13 @@ uv run pytest tests/test_destination_required.py -v
 uv run pytest -q
 uv run pytest tests/test_client_contract.py -q
 ```
-Expected: new tests pass; full suite green minus the known environmental failures (Global Constraints); contract test green — the `create_channel`/`ensure_channel` **signatures are unchanged** (default stays `None`; the omission now raises at runtime), so no manifest regeneration.
+Expected: new tests pass; full suite green minus the known environmental failures (Global Constraints); contract test green — the `create_channel`/`ensure_channel`/`__init__` **signatures are unchanged** (defaults stay `None`; resolution happens at runtime), so no manifest regeneration.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add ka9q/control.py ka9q/multi_stream.py ka9q/__init__.py tests/ examples/
-git commit -m "fix(control): require a resolvable destination — omission silently created nothing (audit F5)
+git commit -m "fix(control): derive per-client destination in create_channel; fail loudly only when underivable (audit F5)
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
@@ -1384,7 +1534,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `pyproject.toml` (version)
 
-- [ ] **Step 1: Version bump** — this plan adds public capability (F11 params, F12 field, F14 export) and one deliberate behavior change (F5 fail-fast on unresolvable destination): a **minor** bump. In `pyproject.toml` change:
+- [ ] **Step 1: Version bump** — this plan adds public capability (F11 params, F12 field, F14 export) and one deliberate behavior change (F5: create_channel now derives a per-client destination from client_id and fails loudly only when neither client_id nor destination= is available): a **minor** bump. In `pyproject.toml` change:
 
 ```toml
 version = "3.21.1"
