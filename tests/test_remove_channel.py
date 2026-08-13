@@ -128,9 +128,10 @@ class TestChannelLifecycle:
         control._command_window_start = __import__('time').time()
         control._rate_limit_lock = __import__('threading').Lock()
         control.metrics = MagicMock()
-        
+        control.client_id = "unit-test"
+
         ssrc = 14074000
-        
+
         # Track commands sent
         commands = []
         def track_command(buffer):

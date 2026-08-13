@@ -35,6 +35,7 @@ def _bare_control() -> RadiodControl:
     c._rate_limit_lock = threading.Lock()
     c.metrics = MagicMock()
     c._requested_encoding = {}
+    c.client_id = "unit-test"
     return c
 
 

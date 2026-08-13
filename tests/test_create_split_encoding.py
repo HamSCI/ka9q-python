@@ -7,7 +7,7 @@ class TestCreateChannelSplit(unittest.TestCase):
     @unittest.mock.patch('ka9q.control.RadiodControl._connect')
     def test_create_channel_splits_encoding(self, mock_connect):
         """Verify that create_channel sends two packets when encoding is specified"""
-        control = RadiodControl("radiod.local")
+        control = RadiodControl("radiod.local", client_id="unit-test")
         control.send_command = MagicMock()
         
         # 1. Create channel WITH encoding

@@ -875,6 +875,12 @@ class RadiodControl:
                       preserves pre-3.14 behavior: when no ``destination=``
                       is passed, radiod uses its config-file default and
                       every client lands on the same group.
+                      client_id is the SUPPORTED way to obtain channel
+                      destinations: create_channel()/ensure_channel()
+                      derive a deterministic per-(client, radiod) multicast
+                      group from it whenever destination= is omitted;
+                      passing destination= explicitly is the legacy path
+                      (audit finding F5).
         """
         self.status_address = status_address
         self.interface = interface
@@ -1272,6 +1278,25 @@ class RadiodControl:
         logger.info(f"Setting output level for SSRC {ssrc} to {level}")
         self.send_command(cmdbuffer)
     
+    def _derive_client_destination(self) -> Optional[str]:
+        """Derive the per-client destination multicast group, or None.
+
+        CONTRACT v0.3 §7: when this RadiodControl was constructed with a
+        client_id, channel destinations default to a deterministic
+        per-(client, radiod) multicast group — unique for this client
+        among others on the station — so peer clients land on distinct
+        groups without per-client derivation code.  Shared by
+        create_channel() and ensure_channel() so the two derivations can
+        never drift apart (audit finding F5, owner ruling 2026-08-13).
+        """
+        if not self.client_id:
+            return None
+        from .addressing import generate_multicast_ip
+        return generate_multicast_ip(
+            unique_id=self.client_id,
+            radiod_host=self.status_address,
+        )
+
     def create_channel(self, frequency_hz: float,
                        preset: str = "iq", sample_rate: Optional[int] = None,
                        agc_enable: int = 0, gain: float = 0.0,
@@ -1304,9 +1329,24 @@ class RadiodControl:
             sample_rate: Output sample rate in Hz (optional, uses radiod default if not set)
             agc_enable: Enable automatic gain control (0=off, 1=on, default: 0)
             gain: Manual gain in dB (default: 0.0). Only used when agc_enable=0
-            destination: RTP destination multicast address (optional). Format: "address" or "address:port"
-                        Examples: "239.1.2.3", "wspr.local", "239.1.2.3:5004"
-                        If not specified, uses radiod's default from config file.
+            destination: RTP destination multicast address.
+                        SUPPORTED MODEL: omit this and construct
+                        RadiodControl with client_id= — ka9q-python derives
+                        a deterministic per-(client, radiod) multicast
+                        group (unique for this client among others),
+                        identical to ensure_channel's derivation.
+                        LEGACY: passing destination= explicitly still works
+                        and wins over derivation (operator override).
+                        Format "address" or "address:port" (e.g.
+                        "239.1.2.3", "wspr.local", "239.1.2.3:5004"); must
+                        name a group this radiod is configured to output
+                        on. When neither client_id nor destination is
+                        available, ValidationError is raised: the
+                        previously documented "radiod config-file default"
+                        fallback does not exist client-side — on audited
+                        deployments an omitted destination silently created
+                        nothing (audit finding F5). A create command is
+                        never sent without a destination TLV.
             encoding: Output encoding (0=none, 4=F32, etc.) - see Encoding class
             ssrc: SSRC (channel identifier). If None, auto-allocated from parameters.
                   Auto-allocation uses allocate_ssrc() for deterministic, shareable SSRCs.
@@ -1340,7 +1380,7 @@ class RadiodControl:
             RuntimeError: If not connected to radiod
         
         Example:
-            >>> control = RadiodControl("radiod.local")
+            >>> control = RadiodControl("radiod.local", client_id="my-app")
             >>> # SSRC-free API (recommended) - SSRC auto-allocated
             >>> ssrc = control.create_channel(
             ...     frequency_hz=14.074e6,
@@ -1356,6 +1396,30 @@ class RadiodControl:
             ...     ssrc=10000000
             ... )
         """
+        # Destination resolution (audit F5): explicit destination= (legacy)
+        # wins; otherwise derive the per-client group from client_id
+        # (supported model); otherwise fail loudly — radiod silently creates
+        # NO channel when the OUTPUT_DATA_DEST_SOCKET TLV is omitted (no
+        # error, no visible SSRC, only a later poll/ensure timeout).  A
+        # create command is never sent without a destination TLV.
+        if destination is None:
+            destination = self._derive_client_destination()
+            if destination is not None:
+                logger.debug(
+                    "create_channel: derived destination=%s for client_id=%r "
+                    "radiod=%r", destination, self.client_id,
+                    self.status_address,
+                )
+        if destination is None:
+            raise ValidationError(
+                "create_channel() could not resolve a destination, and radiod "
+                "silently creates NO channel when the OUTPUT_DATA_DEST_SOCKET "
+                "TLV is omitted (audit finding F5). Construct "
+                "RadiodControl(..., client_id=...) so a deterministic "
+                "per-client destination is derived (supported model), or pass "
+                "destination='239.x.y.z[:port]' explicitly (legacy)."
+            )
+
         # Auto-allocate SSRC if not provided
         if ssrc is None:
             ssrc = allocate_ssrc(
@@ -1689,16 +1753,18 @@ class RadiodControl:
             agc_enable: Enable automatic gain control (0=off, 1=on, default: 0)
             gain: Manual gain in dB (default: 0.0). Only used when agc_enable=0
             destination: RTP destination multicast address (optional).
-                        Precedence: (1) explicit ``destination=`` wins;
-                        (2) otherwise if the RadiodControl was constructed
-                        with ``client_id=``, this method derives a
-                        deterministic ``239.x.y.z`` address from the
-                        (client_id, status_address) pair so each peer
-                        client on a station gets its own multicast group;
-                        (3) otherwise (``destination=None`` and no
-                        ``client_id``), radiod's config-file default is
-                        used.  The resolved address becomes part of the
-                        channel identity (SSRC).
+                        Precedence: (1) explicit ``destination=`` wins
+                        (LEGACY path / operator override); (2) otherwise if
+                        the RadiodControl was constructed with
+                        ``client_id=``, a deterministic per-(client,
+                        radiod) ``239.x.y.z`` address is derived — the
+                        SUPPORTED model, giving each peer client on a
+                        station its own multicast group (same derivation as
+                        create_channel: _derive_client_destination());
+                        (3) otherwise ValidationError is raised — there is
+                        no radiod config-default fallback client-side
+                        (audit finding F5). The resolved address becomes
+                        part of the channel identity (SSRC).
             encoding: Output encoding (0=none, 4=F32, etc.) - see Encoding class
             timeout: Maximum time to wait for channel verification (default: 5.0s)
             frequency_tolerance: Acceptable frequency deviation in Hz (default: 1.0)
@@ -1752,7 +1818,6 @@ class RadiodControl:
             applications requesting the same parameters will share the same
             channel, reducing radiod resource usage.
         """
-        from .addressing import generate_multicast_ip
         from .discovery import ChannelInfo, discover_channels
 
         # Validate inputs
@@ -1762,20 +1827,25 @@ class RadiodControl:
         _validate_preset(preset)
         _validate_timeout(timeout)
 
-        # CONTRACT v0.3 §7: when the RadiodControl was constructed with a
-        # client_id and the caller didn't pass an explicit destination,
-        # derive a deterministic per-(client, radiod) multicast address.
-        # This makes peer clients on the same host land on distinct
-        # multicast groups without per-client derivation code.  An
-        # explicit destination= still wins (e.g. operator override).
-        if destination is None and self.client_id:
-            destination = generate_multicast_ip(
-                unique_id=self.client_id,
-                radiod_host=self.status_address,
-            )
-            logger.debug(
-                "ensure_channel: derived destination=%s for client_id=%r "
-                "radiod=%r", destination, self.client_id, self.status_address,
+        # Destination resolution (audit F5): explicit destination= (legacy)
+        # wins; otherwise derive the per-client group (supported model,
+        # shared with create_channel); otherwise fail loudly.
+        if destination is None:
+            destination = self._derive_client_destination()
+            if destination is not None:
+                logger.debug(
+                    "ensure_channel: derived destination=%s for client_id=%r "
+                    "radiod=%r", destination, self.client_id,
+                    self.status_address,
+                )
+        if destination is None:
+            raise ValidationError(
+                "ensure_channel() could not resolve a destination: construct "
+                "RadiodControl(..., client_id=...) so a deterministic "
+                "per-client destination is derived (supported model), or pass "
+                "destination= explicitly (legacy). Omitting both silently "
+                "creates no channel on radiod deployments without a "
+                "config-file default (audit finding F5)."
             )
 
         # Compute deterministic SSRC from parameters (including radiod identity)

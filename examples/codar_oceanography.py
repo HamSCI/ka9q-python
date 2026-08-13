@@ -51,7 +51,7 @@ def create_codar_channels(control, site_config):
     print(f"\n✓ CODAR channels ready for {site_name}")
 
 def main():
-    control = RadiodControl("bee1-hf-status.local")
+    control = RadiodControl("bee1-hf-status.local", client_id="codar-oceanography")
     
     # Example CODAR site configurations
     # (Real frequencies would come from CODAR site database)

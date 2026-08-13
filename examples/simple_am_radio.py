@@ -10,7 +10,7 @@ from ka9q import RadiodControl
 
 def main():
     # Connect to radiod
-    control = RadiodControl("bee1-hf-status.local")
+    control = RadiodControl("bee1-hf-status.local", client_id="simple-am-radio")
     
     # Create AM channel for WWV 10 MHz
     ssrc = 10000000  # Use frequency as SSRC (convention)

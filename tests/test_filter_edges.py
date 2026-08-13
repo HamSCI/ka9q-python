@@ -38,7 +38,7 @@ def _bare_control() -> RadiodControl:
     c._command_window_start = time.time()
     c._rate_limit_lock = threading.Lock()
     c.metrics = MagicMock()
-    c.client_id = None
+    c.client_id = "unit-test"
     return c
 
 
@@ -153,6 +153,7 @@ class TestEnsureChannelFilterEdges:
 
         control.ensure_channel(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,
+            destination="239.1.2.3",
             low_edge=-500.0, high_edge=+500.0, kaiser_beta=11.0,
         )
 
@@ -174,7 +175,7 @@ class TestEnsureChannelFilterEdges:
         from ka9q.control import allocate_ssrc
         ssrc = allocate_ssrc(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,
-            agc=False, gain=0.0, destination=None, encoding=0,
+            agc=False, gain=0.0, destination="239.1.2.3", encoding=0,
             radiod_host="test.local",
         )
         existing = ChannelInfo(
@@ -186,6 +187,7 @@ class TestEnsureChannelFilterEdges:
 
         control.ensure_channel(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,
+            destination="239.1.2.3",
             low_edge=-500.0, high_edge=+500.0, kaiser_beta=11.0,
         )
 
@@ -207,7 +209,7 @@ class TestEnsureChannelFilterEdges:
 
         ssrc = allocate_ssrc(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,
-            agc=False, gain=0.0, destination=None, encoding=0,
+            agc=False, gain=0.0, destination="239.1.2.3", encoding=0,
             radiod_host="test.local",
         )
         existing = ChannelInfo(
@@ -219,6 +221,7 @@ class TestEnsureChannelFilterEdges:
 
         control.ensure_channel(
             frequency_hz=45.375e6, preset="iq", sample_rate=16000,
+            destination="239.1.2.3",
         )
 
         control.set_filter.assert_not_called()

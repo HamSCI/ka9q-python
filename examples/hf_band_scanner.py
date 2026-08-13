@@ -17,7 +17,7 @@ class HFScanner:
     """General-purpose HF band scanner using radiod"""
     
     def __init__(self, radiod_address):
-        self.control = RadiodControl(radiod_address)
+        self.control = RadiodControl(radiod_address, client_id="hf-band-scanner")
         self.current_ssrc = None
     
     def scan_frequency(self, freq_hz, mode="usb", dwell_time=2.0):

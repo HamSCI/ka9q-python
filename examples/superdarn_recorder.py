@@ -45,7 +45,7 @@ def create_superdarn_channels(control, frequency_list, bandwidth_hz=50000):
 
 def main():
     # Connect to radiod
-    control = RadiodControl("bee1-hf-status.local")
+    control = RadiodControl("bee1-hf-status.local", client_id="superdarn-recorder")
     
     # SuperDARN common frequencies (example - actual depends on radar site)
     superdarn_freqs = [

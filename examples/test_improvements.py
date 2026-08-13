@@ -25,7 +25,7 @@ def test_input_validation():
     print("=" * 70)
     
     try:
-        with RadiodControl("radiod.local") as control:
+        with RadiodControl("radiod.local", client_id="test-improvements") as control:
             # This should raise ValidationError
             control.create_channel(ssrc=-1, frequency_hz=14.074e6)
             print("❌ FAIL: Should have raised ValidationError for negative SSRC")
@@ -35,7 +35,7 @@ def test_input_validation():
         print(f"⚠️  SKIP: Cannot test without radiod running: {e}")
     
     try:
-        with RadiodControl("radiod.local") as control:
+        with RadiodControl("radiod.local", client_id="test-improvements") as control:
             # This should raise ValidationError
             control.create_channel(ssrc=10000, frequency_hz=-1000)
             print("❌ FAIL: Should have raised ValidationError for negative frequency")
@@ -45,7 +45,7 @@ def test_input_validation():
         print(f"⚠️  SKIP: Cannot test without radiod running")
     
     try:
-        with RadiodControl("radiod.local") as control:
+        with RadiodControl("radiod.local", client_id="test-improvements") as control:
             # This should raise ValidationError
             control.set_sample_rate(ssrc=10000, sample_rate=0)
             print("❌ FAIL: Should have raised ValidationError for zero sample rate")
@@ -65,7 +65,7 @@ def test_context_manager():
     
     try:
         # Test normal exit
-        with RadiodControl("radiod.local") as control:
+        with RadiodControl("radiod.local", client_id="test-improvements") as control:
             print(f"✅ PASS: Context manager __enter__ worked")
             # Socket should be open
             assert control.socket is not None or control.socket is None  # May fail to connect
@@ -78,7 +78,7 @@ def test_context_manager():
     
     try:
         # Test exception exit
-        with RadiodControl("radiod.local") as control:
+        with RadiodControl("radiod.local", client_id="test-improvements") as control:
             raise ValueError("Test exception")
     except ValueError:
         print(f"✅ PASS: Exception propagated correctly, resources still cleaned up")
@@ -97,7 +97,7 @@ def test_thread_safety():
     import threading
     
     try:
-        control = RadiodControl("radiod.local")
+        control = RadiodControl("radiod.local", client_id="test-improvements")
         errors = []
         
         def worker(freq_mhz):
@@ -168,7 +168,7 @@ def test_new_api():
     print("=" * 70)
     
     try:
-        with RadiodControl("radiod.local") as control:
+        with RadiodControl("radiod.local", client_id="test-improvements") as control:
             # Test that create_channel method exists
             assert hasattr(control, 'create_channel')
             print("✅ PASS: create_channel() method exists")

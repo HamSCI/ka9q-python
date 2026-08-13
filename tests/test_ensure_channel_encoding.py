@@ -34,9 +34,10 @@ class TestEnsureChannelEncoding(unittest.TestCase):
             # Call ensure_channel asking for F32
             result = self.control.ensure_channel(
                 frequency_hz=14.074e6,
+                destination="239.1.1.1",
                 encoding=Encoding.F32
             )
-            
+
             # Should return existing channel
             self.assertEqual(result, existing)
             # Should NOT call create_channel
@@ -65,9 +66,10 @@ class TestEnsureChannelEncoding(unittest.TestCase):
             # Call ensure_channel asking for F32
             result = self.control.ensure_channel(
                 frequency_hz=14.074e6,
+                destination="239.1.1.1",
                 encoding=Encoding.F32
             )
-            
+
             # Should call create_channel with correct encoding
             self.control.create_channel.assert_called_once()
             _, kwargs = self.control.create_channel.call_args

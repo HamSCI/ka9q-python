@@ -48,7 +48,7 @@ Manual channel management:
 Lower-level usage (explicit control):
     from ka9q import RadiodControl, allocate_ssrc
     
-    with RadiodControl("radiod.local") as control:
+    with RadiodControl("radiod.local", client_id="my-app") as control:
         ssrc = control.create_channel(
             frequency_hz=10.0e6,
             preset="am",

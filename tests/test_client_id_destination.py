@@ -13,8 +13,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 from ka9q.addressing import generate_multicast_ip
 from ka9q.control import RadiodControl
+from ka9q.exceptions import ValidationError
 
 
 def _ensure_dest(ctrl: RadiodControl, *, destination=None) -> object:
@@ -73,13 +76,15 @@ class TestDestinationPrecedence(unittest.TestCase):
         self.assertEqual(dest, "239.1.2.3")
 
     @patch('ka9q.control.RadiodControl._connect')
-    def test_no_client_id_keeps_destination_none(self, _c):
-        """Pre-3.14 behavior preserved: no client_id, no explicit
-        destination -> destination=None flows through so radiod uses
-        its config-file default."""
+    def test_no_client_id_no_destination_raises(self, _c):
+        """Audit F5 (owner ruling 2026-08-13): no client_id, no explicit
+        destination -> ValidationError, not a silent None fallthrough.
+        radiod creates NO channel when the destination TLV is omitted, so
+        ensure_channel now fails loudly instead of preserving pre-3.14
+        behavior."""
         ctrl = RadiodControl("radiod.local")
-        dest = _ensure_dest(ctrl, destination=None)
-        self.assertIsNone(dest)
+        with pytest.raises(ValidationError, match="destination"):
+            _ensure_dest(ctrl, destination=None)
 
     @patch('ka9q.control.RadiodControl._connect')
     def test_client_id_derives_destination(self, _c):

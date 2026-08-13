@@ -36,7 +36,7 @@ def pattern1_context_manager():
     print("Pattern 1: Context Manager with Explicit Cleanup")
     print("=" * 60)
     
-    with RadiodControl("radiod.local") as control:
+    with RadiodControl("radiod.local", client_id="channel-cleanup-example") as control:
         ssrc = 14074000
         
         # Create channel
@@ -69,7 +69,7 @@ def pattern2_try_finally():
     print("Pattern 2: Try/Finally Block")
     print("=" * 60)
     
-    control = RadiodControl("radiod.local")
+    control = RadiodControl("radiod.local", client_id="channel-cleanup-example")
     ssrc = 7074000
     
     try:
@@ -104,7 +104,7 @@ def pattern3_multiple_channels():
     print("Pattern 3: Multiple Channels with Cleanup")
     print("=" * 60)
     
-    control = RadiodControl("radiod.local")
+    control = RadiodControl("radiod.local", client_id="channel-cleanup-example")
     created_channels = []
     
     try:
@@ -146,7 +146,7 @@ def pattern4_long_running_app():
     print("Pattern 4: Long-Running Application (Dynamic Channels)")
     print("=" * 60)
     
-    with RadiodControl("radiod.local") as control:
+    with RadiodControl("radiod.local", client_id="channel-cleanup-example") as control:
         # Simulate scanning multiple frequencies
         frequencies = [14.074e6, 14.076e6, 14.078e6]
         
@@ -182,7 +182,7 @@ def anti_pattern_no_cleanup():
     print("⚠️  ANTI-PATTERN: No Cleanup (DON'T DO THIS!)")
     print("=" * 60)
     
-    with RadiodControl("radiod.local") as control:
+    with RadiodControl("radiod.local", client_id="channel-cleanup-example") as control:
         ssrc = 99999999
         
         print(f"Creating channel SSRC={ssrc}")
@@ -223,7 +223,7 @@ def main():
         
         # Clean up the anti-pattern example
         print("Cleaning up anti-pattern channel...")
-        with RadiodControl("radiod.local") as control:
+        with RadiodControl("radiod.local", client_id="channel-cleanup-example") as control:
             control.remove_channel(ssrc=99999999)
         print("✓ Orphaned channel cleaned up\n")
         

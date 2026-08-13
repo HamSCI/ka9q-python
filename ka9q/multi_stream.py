@@ -204,6 +204,13 @@ class MultiStream:
         value (10-30 s) so a brief radiod-busy window doesn't fail
         the whole channel registration.
 
+        Because add_channel has no ``destination=`` parameter, the
+        RadiodControl this MultiStream wraps MUST be constructed with
+        ``client_id=`` so a per-client destination is derived (the
+        supported model); otherwise ensure_channel raises ValidationError
+        (audit finding F5 — an omitted destination used to silently
+        create nothing).
+
         Returns the ChannelInfo from ensure_channel().
         """
         channel_info = self._control.ensure_channel(
