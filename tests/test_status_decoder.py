@@ -159,3 +159,21 @@ def test_field_accessors_and_snr():
     assert st.snr_per_hz == pytest.approx(130.0)
     # S/N ≈ baseband - (noise_density + 10log10(3000)) ≈ -40 - (-170 + 34.77) ≈ 95.2
     assert st.snr == pytest.approx(95.23, abs=0.1)
+
+
+def test_decode_setopts_options_bitmask():
+    """radiod encode_int64()s chan->options under SETOPTS on every status
+    packet; it must land in ChannelStatus.options (audit F12)."""
+    pkt = _build_packet(
+        ("int", StatusType.OUTPUT_SSRC, 42),
+        ("int64", StatusType.SETOPTS, 0b1010),
+    )
+    st = decode_status_packet(pkt)
+    assert st is not None
+    assert st.options == 0b1010
+
+
+def test_options_none_when_absent():
+    pkt = _build_packet(("int", StatusType.OUTPUT_SSRC, 42))
+    st = decode_status_packet(pkt)
+    assert st.options is None

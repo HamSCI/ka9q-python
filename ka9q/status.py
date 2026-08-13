@@ -254,6 +254,9 @@ class ChannelStatus:
     lifetime: Optional[int] = None             # LIFETIME — frames until self-destruct
                                                # (0 = infinite; >0 decrements at the radiod
                                                # frame rate ≈ 50 Hz; reset to ≥20 s on poll)
+    options: Optional[int] = None              # SETOPTS — demod option bitmask;
+                                               # radiod encodes chan->options on
+                                               # every status packet (audit F12)
 
     # Test points
     tp1: Optional[float] = None
@@ -618,6 +621,8 @@ def decode_status_packet(buffer: bytes) -> Optional[ChannelStatus]:
             st.independent_sideband = decode_bool(data, optlen)
         elif t == StatusType.LIFETIME:
             st.lifetime = decode_int(data, optlen)
+        elif t == StatusType.SETOPTS:
+            st.options = decode_int64(data, optlen)
 
         # ---- Test points ----
         elif t == StatusType.TP1:
