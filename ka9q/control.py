@@ -841,6 +841,14 @@ def _encoding_name(value: Optional[int]) -> str:
     return f"UNKNOWN({value})"
 
 
+#: Bounds on `RadiodControl._drain_status_socket`. Comfortably above a full
+#: receive buffer's worth of status packets (~26k for a 5 MB queue), while
+#: guaranteeing the drain terminates even if the group refills as fast as it
+#: is read -- or if the socket is a test double that never raises.
+_DRAIN_MAX_PACKETS = 50000
+_DRAIN_MAX_SEC = 0.25
+
+
 class RadiodControl:
     """
     Control interface for radiod
@@ -2162,6 +2170,65 @@ class RadiodControl:
         
         return status_sock
     
+    @staticmethod
+    def _drain_status_socket(sock) -> int:
+        """Discard whatever is already queued. Returns how many were dropped.
+
+        The cached poll socket is joined to radiod's status group but read
+        ONLY during a poll, so between polls the kernel queues the entire
+        continuous status broadcast into it. Left alone it reaches the
+        receive-buffer ceiling and stays there: on B4, wspr-recorder's copy
+        sat permanently full and had discarded 1,254,234 packets, ~24/s.
+
+        Two costs, and the second is the one that matters. The socket pins
+        its whole buffer in kernel memory; and every poll then has to
+        recvfrom() and decode its way through thousands of stale packets
+        before reaching the reply it wants, inside a 2 s timeout. Draining
+        first makes a poll read only post-command traffic, which is what a
+        request/response exchange on a shared multicast group requires
+        anyway.
+
+        Correctness does not depend on this -- `poll_status` matches on
+        `command_tag` and would reject stale packets regardless -- but
+        latency and the drop counter do.
+
+        Bounded on purpose. An unbounded "read until it raises" loop becomes
+        the stall it exists to prevent: on a busy group the socket can be
+        refilled as fast as it is emptied, and the drain never returns. The
+        caps below are far above a full buffer's worth (a 5 MB queue of
+        ~200-byte status packets is ~26k) yet still terminate. This was not
+        theoretical -- the first version hung the tune() test suite outright,
+        because a mocked socket never raises.
+        """
+        n = 0
+        deadline = time.monotonic() + _DRAIN_MAX_SEC
+        sock.setblocking(False)
+        try:
+            for _ in range(_DRAIN_MAX_PACKETS):
+                try:
+                    sock.recv(65536)
+                    n += 1
+                except (BlockingIOError, InterruptedError):
+                    break
+                except OSError:
+                    break
+                if not n % 256 and time.monotonic() > deadline:
+                    logger.warning(
+                        "status drain hit its %.2fs budget after %d packets; "
+                        "the group is busier than the drain can empty",
+                        _DRAIN_MAX_SEC, n)
+                    break
+            else:
+                logger.warning(
+                    "status drain hit its %d-packet cap; some stale status "
+                    "remains queued", _DRAIN_MAX_PACKETS)
+        finally:
+            sock.setblocking(True)
+            sock.settimeout(0.1)
+        if n:
+            logger.debug("drained %d stale status packet(s) before poll", n)
+        return n
+
     def _get_or_create_status_listener(self):
         """
         Get cached status listener socket or create new one if needed.
@@ -2329,6 +2396,10 @@ class RadiodControl:
         # Get cached status listener (or create if first use)
         # Socket is reused across tune() calls to avoid creation/destruction overhead
         status_sock = self._get_or_create_status_listener()
+        # Same request/response contract as poll_status: only packets that
+        # arrive after the tune command can be its reply, and wading through
+        # a full buffer's worth of stale ones eats the timeout.
+        self._drain_status_socket(status_sock)
         
         try:
             start_time = time.time()
@@ -3319,6 +3390,8 @@ class RadiodControl:
         encode_eol(cmdbuffer)
 
         status_sock = self._get_or_create_status_listener()
+        # Only traffic that arrives AFTER the command can be its reply.
+        self._drain_status_socket(status_sock)
         start = _time.time()
         last_send = 0.0
         retry = 0.1
