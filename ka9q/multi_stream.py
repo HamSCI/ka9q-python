@@ -86,6 +86,16 @@ class _ChannelSlot:
     dropped: bool = False
     first_rtp_timestamp: Optional[int] = None
     lifetime: Optional[int] = None
+    # Creation-time settings that _attempt_restore must re-send in full.
+    # Same bug class as 731ce5e (lifetime/encoding): any field accepted by
+    # add_channel() but missing here silently reverts on restore — and
+    # agc_enable/gain also feed allocate_ssrc()'s hash, so dropping them
+    # made a restore land on a *different SSRC* (audit finding F1, P0).
+    agc_enable: int = 0
+    gain: float = 0.0
+    low_edge: Optional[float] = None
+    high_edge: Optional[float] = None
+    kaiser_beta: Optional[float] = None
     last_gaps: int = 0          # resequencer gaps_detected at last health check
     gap_storm_secs: float = 0.0  # how long the gap rate has stayed pathological
     # Wire-format verification of the granted encoding (see
@@ -254,6 +264,11 @@ class MultiStream:
             on_stream_restored=on_stream_restored,
             deliver_interval=self._deliver_interval,
             lifetime=lifetime,
+            agc_enable=agc_enable,
+            gain=gain,
+            low_edge=low_edge,
+            high_edge=high_edge,
+            kaiser_beta=kaiser_beta,
         )
         self._slots[ssrc] = slot
 
@@ -690,7 +705,12 @@ class MultiStream:
                 frequency_hz=slot.frequency_hz,
                 preset=slot.preset,
                 sample_rate=slot.sample_rate,
-                encoding=slot.encoding,
+                agc_enable=slot.agc_enable,
+                gain=slot.gain,
+                encoding=slot.requested_encoding,
+                low_edge=slot.low_edge,
+                high_edge=slot.high_edge,
+                kaiser_beta=slot.kaiser_beta,
                 lifetime=slot.lifetime,
             )
             new_ssrc = channel_info.ssrc
@@ -699,6 +719,12 @@ class MultiStream:
                 self._slots[new_ssrc] = slot
 
             slot.channel_info = channel_info
+            # Re-resolve the granted wire encoding (radiod may re-grant a
+            # different encoding than requested — same authority rule as
+            # add_channel(); parsing with a stale dtype NaN-poisons samples).
+            slot.encoding = (
+                getattr(channel_info, 'encoding', 0) or slot.requested_encoding
+            )
             slot.dropped = False
             slot.first_rtp_timestamp = None
             slot.resequencer = PacketResequencer(
