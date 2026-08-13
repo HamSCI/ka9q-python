@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import inspect
 import json
@@ -41,6 +42,42 @@ def _symbols(clause: str) -> list[str]:
     return names
 
 
+def _scan_text_ast(text: str) -> dict[str, set[str]] | None:
+    """Parse ka9q from-imports via the AST; returns None if the file doesn't parse.
+
+    ast.parse naturally handles parenthesized multi-line import clauses
+    (`from ka9q.x import (\\n    A, B,\\n)`), which the line-based regex
+    fallback below cannot -- it only ever sees one physical line at a time.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    found: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        # level == 0 excludes relative imports (`from ...ka9q_encoding import
+        # x`), which the regex fallback never matched either -- it requires
+        # "ka9q" immediately after "from ", not after leading dots. A
+        # relative "ka9q_encoding" resolves within the *client's own*
+        # package tree, not this ka9q-python package.
+        if (isinstance(node, ast.ImportFrom) and node.level == 0
+                and node.module and node.module.startswith("ka9q")):
+            found.setdefault(node.module, set()).update(
+                alias.name for alias in node.names
+            )
+    return found
+
+
+def _scan_text_regex(text: str) -> dict[str, set[str]]:
+    """Line-based fallback for files ast.parse can't handle (e.g. py2, templated)."""
+    found: dict[str, set[str]] = {}
+    for line in text.splitlines():
+        m = FROM_IMPORT.match(line)
+        if m:
+            found.setdefault(m.group(1), set()).update(_symbols(m.group(2)))
+    return found
+
+
 def scan_repo(path: Path) -> dict[str, list[str]]:
     found: dict[str, set[str]] = {}
     for py in sorted(path.rglob("*.py")):
@@ -50,10 +87,11 @@ def scan_repo(path: Path) -> dict[str, list[str]]:
             text = py.read_text(errors="replace")
         except OSError:
             continue
-        for line in text.splitlines():
-            m = FROM_IMPORT.match(line)
-            if m:
-                found.setdefault(m.group(1), set()).update(_symbols(m.group(2)))
+        file_found = _scan_text_ast(text)
+        if file_found is None:
+            file_found = _scan_text_regex(text)
+        for mod, syms in file_found.items():
+            found.setdefault(mod, set()).update(syms)
     return {mod: sorted(syms) for mod, syms in sorted(found.items())}
 
 

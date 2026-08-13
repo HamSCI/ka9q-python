@@ -26,6 +26,16 @@ def test_scan_repo_collects_symbols_per_module(tmp_path):
     }
 
 
+def test_scan_repo_collects_parenthesized_multiline_import(tmp_path):
+    repo = make_client(tmp_path, "clientC", (
+        "from ka9q import (\n"
+        "    SlotClock,\n"
+        "    Encoding,\n"
+        ")\n"
+    ))
+    assert scan_repo(repo) == {"ka9q": ["Encoding", "SlotClock"]}
+
+
 def test_scan_repo_skips_venv_and_git(tmp_path):
     repo = make_client(tmp_path, "clientB", "from ka9q import SlotClock\n")
     hidden = repo / ".venv" / "lib"
