@@ -2194,6 +2194,10 @@ class RadiodControl:
         
         if encoding is not None:
             encode_int(cmdbuffer, StatusType.OUTPUT_ENCODING, encoding)
+            # F4: record the request so set_channel_lifetime()'s keepalive
+            # re-assertion and verify_channel()'s default expectation track
+            # channels retuned via tune() too (same bug class as 731ce5e).
+            self._requested_encoding[ssrc] = encoding
         
         if rf_gain is not None:
             encode_float(cmdbuffer, StatusType.RF_GAIN, rf_gain)

@@ -125,6 +125,39 @@ class TestVerifyChannelChecksEncoding:
         assert c.verify_channel(77) is True
 
 
+class TestTuneRecordsRequestedEncoding:
+    """tune(encoding=X) must write _requested_encoding[ssrc] (audit F4) so
+    the keepalive re-assertion and verify_channel()'s default expectation
+    track channels retuned via tune(), not only create_channel()/
+    set_output_encoding().  Same bug class as 731ce5e."""
+
+    def _abort_after_first_send(self, control, sent):
+        def side_effect(buf):
+            sent.append(bytes(buf))
+            raise TimeoutError("aborted after first send (unit test)")
+        control.send_command = MagicMock(side_effect=side_effect)
+        control._get_or_create_status_listener = MagicMock(
+            return_value=MagicMock())
+
+    def test_tune_encoding_is_remembered(self):
+        c = _bare_control()
+        sent = []
+        self._abort_after_first_send(c, sent)
+        with pytest.raises(TimeoutError):
+            c.tune(ssrc=555, frequency_hz=7_040_000.0,
+                   encoding=Encoding.F32LE, timeout=0.05)
+        assert c._requested_encoding[555] == Encoding.F32LE
+
+    def test_tune_without_encoding_leaves_record_alone(self):
+        c = _bare_control()
+        c._requested_encoding[555] = Encoding.F32LE
+        sent = []
+        self._abort_after_first_send(c, sent)
+        with pytest.raises(TimeoutError):
+            c.tune(ssrc=555, frequency_hz=7_040_000.0, timeout=0.05)
+        assert c._requested_encoding[555] == Encoding.F32LE
+
+
 class TestEncodingName:
     def test_known(self):
         assert _encoding_name(Encoding.F32LE) == "F32LE(4)"
