@@ -36,6 +36,20 @@ def test_scan_repo_collects_parenthesized_multiline_import(tmp_path):
     assert scan_repo(repo) == {"ka9q": ["Encoding", "SlotClock"]}
 
 
+def test_scan_repo_ignores_relative_import_of_client_internal_module(tmp_path):
+    # A client-internal module that happens to be named/prefixed like
+    # "ka9q..." (e.g. sigmond's own `ka9q_encoding.py`) reached via a
+    # relative import must NOT be mistaken for this ka9q-python package.
+    # The regex fallback never matched these (it requires "ka9q" right
+    # after "from ", not after leading dots); the AST path must not
+    # regress that by matching on `module.startswith("ka9q")` alone.
+    repo = make_client(tmp_path, "clientD", (
+        "from ka9q import RadiodControl\n"
+        "from ...ka9q_encoding import decode_encoding\n"
+    ))
+    assert scan_repo(repo) == {"ka9q": ["RadiodControl"]}
+
+
 def test_scan_repo_skips_venv_and_git(tmp_path):
     repo = make_client(tmp_path, "clientB", "from ka9q import SlotClock\n")
     hidden = repo / ".venv" / "lib"
