@@ -134,3 +134,16 @@ Operator workflow when the watcher is yellow/red:
 
 Sigmond exposes the watcher as `smd ka9q-watch` and as a TUI screen
 (Observe → ka9q-watch).
+
+### Client compatibility guardrails
+
+- `tests/client_usage_manifest.json` — checked-in snapshot of every ka9q
+  symbol each sigmond-suite client imports, with signatures. Regenerate
+  after intentional API changes: `uv run python scripts/gen_client_manifest.py`
+  (scans /opt/git/sigmond). Review the diff — it is exactly what clients see.
+- `tests/test_client_contract.py` — fails, naming the affected clients, if
+  a manifest symbol disappears or changes signature.
+- `tests/test_idempotency_integration.py` — live-radiod guardrails
+  (create-twice convergence, keepalive setting preservation, idempotent
+  remove). Runs against `--radiod-host` (b1/b2 only), skips cleanly offline.
+  Self-configures multicast interface and destination at runtime.
