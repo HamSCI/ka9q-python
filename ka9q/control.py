@@ -31,7 +31,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Union
-from .types import StatusType, CMD, Encoding
+from .types import StatusType, CMD, Encoding, DemodType
 from .discovery import discover_channels
 from .exceptions import ConnectionError, CommandError, ValidationError
 from .utils import resolve_multicast_address
@@ -2938,7 +2938,10 @@ class RadiodControl:
 
         Args:
             ssrc: SSRC of the channel
-            demod_type: Demodulator type (0=LINEAR, 1=FM, 2=WFM, 3=SPECTRUM, 4=SPECTRUM2)
+            demod_type: Demodulator type — use the DemodType constants
+                (0=LINEAR, 1=FM, 2=WFM, 3=SPECTRUM, 4=SPECTRUM2, 5=IDLE).
+                The valid range is derived from DemodType.N_DEMOD so it
+                tracks types.py resyncs automatically (audit finding F13).
 
         Raises:
             ValidationError: If demod_type is invalid
@@ -2947,8 +2950,11 @@ class RadiodControl:
             >>> control.set_demod_type(ssrc=12345, demod_type=1)  # FM
         """
         _validate_ssrc(ssrc)
-        if not (0 <= demod_type <= 4):
-            raise ValidationError(f"Invalid demod_type: {demod_type} (must be 0-4)")
+        if not (0 <= demod_type < DemodType.N_DEMOD):
+            raise ValidationError(
+                f"Invalid demod_type: {demod_type} "
+                f"(must be 0-{DemodType.N_DEMOD - 1})"
+            )
         
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
