@@ -1328,7 +1328,7 @@ class RadiodControl:
                    - "am": Amplitude modulation
                    - "fm": Frequency modulation
                    - "cw": Morse code
-            sample_rate: Output sample rate in Hz (optional, uses radiod default if not set)
+            sample_rate: Output sample rate in Hz (optional; radiod default applies on a fresh SSRC only — see the re-create Note below)
             agc_enable: Enable automatic gain control (0=off, 1=on, default: 0)
             gain: Manual gain in dB (default: 0.0). Only used when agc_enable=0
             destination: RTP destination multicast address.
@@ -1356,12 +1356,14 @@ class RadiodControl:
                   None (default) = don't send; the channel inherits radiod's
                   Template default (infinite). Integer value = sent verbatim as
                   the LIFETIME tag, in radiod main-loop frames; 0 = infinite,
-                  >0 = decremented at the radiod frame rate (~50 Hz at default
-                  20 ms blocktime, so ~1000 frames ≈ 20 s) and the channel
-                  self-destructs at zero. Each subsequent poll auto-extends
-                  the lifetime to at least Channel_idle_timeout (~20 s) — so
-                  callers using a finite lifetime as a crash-safe cleanup
-                  must keep polling (e.g. via tune() or set_channel_lifetime).
+                  >0 = decremented at the radiod frame rate (~50 frames/s at
+                  the default 20 ms blocktime, so 1000 frames ≈ 20 s) and the
+                  channel self-destructs at zero. Polling does NOT extend the
+                  lifetime (verified live 2026-08-12, audit finding F7): only
+                  a command that carries a LIFETIME tag refreshes the timer.
+                  Callers using a finite lifetime as crash-safe cleanup must
+                  periodically re-send set_channel_lifetime() (or
+                  tune(lifetime=...)).
             low_edge: Channel filter low edge in Hz, relative to channel
                   center (typically negative for symmetric IQ filters).
                   None = use the preset's default. Useful for clients that
@@ -1380,7 +1382,18 @@ class RadiodControl:
             CommandError: If command fails to send
             ValidationError: If parameters are invalid
             RuntimeError: If not connected to radiod
-        
+
+        Note:
+            Calling create_channel() again for an SSRC that already exists
+            on radiod is a DELTA-UPDATE, not an atomic reset (verified live,
+            audit finding F3): radiod only mutates fields whose TLV is
+            present in this packet. Fields the active preset's config stanza
+            defines are reset to the preset default on every PRESET-bearing
+            create; fields the preset does not define keep whatever an
+            earlier command set. "Uses radiod's default if not set" is true
+            only for a fresh SSRC. To force a known state on an existing
+            channel, pass every field explicitly.
+
         Example:
             >>> control = RadiodControl("radiod.local", client_id="my-app")
             >>> # SSRC-free API (recommended) - SSRC auto-allocated
@@ -1819,6 +1832,12 @@ class RadiodControl:
             The deterministic SSRC allocation enables stream sharing: multiple
             applications requesting the same parameters will share the same
             channel, reducing radiod resource usage.
+
+            Re-create semantics: when an existing channel mismatches and
+            ensure_channel falls through to create_channel(), that create is
+            a delta-update of the surviving radiod channel state, not an
+            atomic reset — see create_channel()'s re-create Note (audit
+            finding F3).
         """
         from .discovery import ChannelInfo, discover_channels
 
@@ -2035,21 +2054,22 @@ class RadiodControl:
         Set / refresh a channel's auto-destruct timer.
 
         ka9q-radio commit 0f8b622+ added a per-channel ``lifetime`` field
-        that decrements every radiod main-loop frame (~50 Hz at the
-        default 20 ms blocktime) and destroys the channel when it
-        reaches zero.  Polling auto-extends a non-zero lifetime to at
-        least ~20 s, so a client using this for crash-safe cleanup
-        should call this method (or any other poll) periodically as a
-        keep-alive.
+        that decrements every radiod main-loop frame (~50 frames/s at the
+        default 20 ms blocktime; 1000 frames ≈ 20 s) and destroys the
+        channel when it reaches zero.  Bare polls do NOT extend the
+        lifetime (verified live 2026-08-12: a lifetime=1000 channel expired
+        on schedule through four poll_channel() calls — audit finding F7):
+        only a command carrying a LIFETIME tag refreshes the timer.  A
+        client using this for crash-safe cleanup must call this method (or
+        any command that includes a LIFETIME tag, e.g. tune(lifetime=...))
+        periodically as a keep-alive.
 
         Args:
             ssrc: SSRC of the channel.
             lifetime: New lifetime value, sent verbatim as the LIFETIME
                 tag (units: radiod frames).  ``0`` = infinite (channel
                 lives until explicitly destroyed).  ``>0`` = self-
-                destruct after that many frames; radiod will bump it up
-                to the configured idle-timeout floor (typically 1000
-                frames ≈ 20 s) when this poll is processed.
+                destruct after that many frames; frames tick at ~50/s (default 20 ms blocktime).
             encoding: Output encoding to re-assert alongside the refresh.
                 Defaults to whatever was last requested for this SSRC via
                 :py:meth:`create_channel` or
