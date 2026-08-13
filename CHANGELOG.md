@@ -1,5 +1,56 @@
 # Changelog
 
+## 3.22.0 (2026-08-13)
+
+Audit remediation follow-up (findings F1, F3-F8, F10-F14 from the
+2026-08 upstream-alignment audit; see `docs/audit/` and
+`.superpowers/sdd/2026-08-13-audit-remediation/`). Minor bump: adds
+public capability and one deliberate, owner-ruled behavior change.
+
+### Changed (behavior)
+
+- **`create_channel()` now derives a per-client multicast destination
+  from `client_id` when `destination=` is not given, and raises
+  `ValidationError` when *neither* is available** (F5). Previously a
+  bare `create_channel()` call with no `client_id` and no
+  `destination=` silently created nothing useful (no address the
+  caller could ever receive on) rather than failing. Any caller that
+  relied on that silent no-op must now pass `client_id=` (recommended)
+  or an explicit `destination=`.
+
+### Added
+
+- **`set_spectrum()`** gains `window`, `avg`, `overlap`, `base`, `step`
+  parameters (plus `demod`/`freq`); `SpectrumStream` delegates to it
+  (F11).
+- **`ChannelStatus.options`** decodes the `SETOPTS` TLV (F12).
+- **`DemodType.INVALID_DEMOD = -1`** now parses correctly from
+  upstream headers (negative enum literals were previously dropped by
+  `sync_types.py`) (F10); `set_demod_type()`'s bound now derives from
+  `DemodType.N_DEMOD` so `IDLE_DEMOD` is no longer wrongly rejected
+  (F13).
+- **`resolve_multicast_address` re-exported from `ka9q`** (F14).
+
+### Fixed
+
+- **`MultiStream` re-sends `agc`/`gain`/filter-edges/requested-encoding**
+  on channel re-creation after a radiod restart — this had regressed
+  silently (F1, P0).
+- **`tune()` records `_requested_encoding`** so keepalives re-assert
+  the caller's chosen encoding instead of drifting back to the
+  channel's current one (F4).
+- **`set_lock()` warns** that radiod silently discards `LOCK` rather
+  than failing (F6).
+
+### Docs
+
+- Corrected re-create/lifetime semantics (delta-update only; polls
+  don't extend lifetime; units are frames, not seconds) (F3, F7).
+- Corrected a stale pre-3.14 fallback claim in the `client_id`
+  docstring (F5 follow-up).
+- README Troubleshooting: a `lo`-route silently swallows control
+  commands; use `interface=` (F8).
+
 ## 3.21.1 (2026-08-11)
 
 - **Fix: `StreamQuality.copy()` dropped `delivered_rtp_start`** — the
