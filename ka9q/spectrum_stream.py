@@ -40,9 +40,9 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .control import RadiodControl, encode_int, encode_float, encode_double, encode_eol
+from .control import RadiodControl
 from .status import ChannelStatus, decode_status_packet
-from .types import StatusType, DemodType, CMD
+from .types import DemodType
 
 logger = logging.getLogger(__name__)
 
@@ -223,25 +223,26 @@ class SpectrumStream:
     # ------------------------------------------------------------------
 
     def _send_spectrum_command(self):
-        """Build and send a TLV COMMAND packet requesting spectrum data."""
-        buf = bytearray()
-        buf.append(CMD)
-        encode_int(buf, StatusType.OUTPUT_SSRC, self._ssrc)
-        encode_int(buf, StatusType.COMMAND_TAG, secrets.randbits(31))
-        encode_int(buf, StatusType.DEMOD_TYPE, self._demod_type)
-        encode_double(buf, StatusType.RADIO_FREQUENCY, self._frequency_hz)
-        encode_float(buf, StatusType.RESOLUTION_BW, self._resolution_bw)
-        encode_int(buf, StatusType.BIN_COUNT, self._bin_count)
-        if self._window_type is not None:
-            encode_int(buf, StatusType.WINDOW_TYPE, self._window_type)
-        if self._kaiser_beta is not None:
-            encode_float(buf, StatusType.SPECTRUM_SHAPE, self._kaiser_beta)
-        if self._averaging is not None:
-            encode_int(buf, StatusType.SPECTRUM_AVG, self._averaging)
-        if self._overlap is not None:
-            encode_float(buf, StatusType.SPECTRUM_OVERLAP, self._overlap)
-        encode_eol(buf)
-        self._control.send_command(buf)
+        """Request spectrum data via RadiodControl.set_spectrum().
+
+        Formerly hand-encoded its own TLV buffer, which made it the only
+        reachable write path for WINDOW_TYPE/SPECTRUM_AVG/SPECTRUM_OVERLAP;
+        migrated to the public set_spectrum() so there is exactly one
+        spectrum write path (audit finding F11).  Packet layout (DEMOD_TYPE
+        and RADIO_FREQUENCY before the analyzer parameters, all in one
+        command) is preserved by set_spectrum().
+        """
+        self._control.set_spectrum(
+            self._ssrc,
+            bin_bw_hz=self._resolution_bw,
+            bin_count=self._bin_count,
+            kaiser_beta=self._kaiser_beta,
+            window_type=self._window_type,
+            avg=self._averaging,
+            overlap=self._overlap,
+            demod_type=self._demod_type,
+            frequency_hz=self._frequency_hz,
+        )
         self._polls_sent += 1
 
     def _create_status_socket(self) -> socket.socket:

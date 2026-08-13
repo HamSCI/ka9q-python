@@ -2866,25 +2866,64 @@ class RadiodControl:
         self.send_command(cmdbuffer)
     
     def set_spectrum(self, ssrc: int, bin_bw_hz: Optional[float] = None, bin_count: Optional[int] = None,
-                     crossover_hz: Optional[float] = None, kaiser_beta: Optional[float] = None):
+                     crossover_hz: Optional[float] = None, kaiser_beta: Optional[float] = None,
+                     window_type: Optional[int] = None, avg: Optional[int] = None,
+                     overlap: Optional[float] = None, base: Optional[float] = None,
+                     step: Optional[float] = None, demod_type: Optional[int] = None,
+                     frequency_hz: Optional[float] = None):
         """
-        Configure spectrum analyzer mode parameters
-        
+        Configure spectrum analyzer mode parameters.
+
+        Every parameter is optional; only the TLVs for parameters you pass
+        are sent (radiod leaves absent fields unchanged — delta-update).
+        This is the single public write path for spectrum TLVs; audit
+        finding F11 added window_type/avg/overlap/base/step (previously
+        unreachable or reachable only via SpectrumStream's private buffer)
+        plus demod_type/frequency_hz so SpectrumStream can build its whole
+        channel-setup command through this method in one packet.
+
         Args:
             ssrc: SSRC of the channel
-            bin_bw_hz: Bin bandwidth in Hz (optional)
-            bin_count: Number of frequency bins (optional)
-            crossover_hz: Crossover frequency between algorithms in Hz (optional)
-            kaiser_beta: Kaiser window beta for spectrum analysis (optional)
-        
+            bin_bw_hz: Bin bandwidth in Hz (RESOLUTION_BW)
+            bin_count: Number of frequency bins (BIN_COUNT)
+            crossover_hz: Crossover frequency between algorithms in Hz (CROSSOVER)
+            kaiser_beta: Kaiser window beta for spectrum analysis (SPECTRUM_SHAPE)
+            window_type: FFT window (WINDOW_TYPE — see WindowType constants)
+            avg: Number of FFTs averaged into each spectrum response
+                 (SPECTRUM_AVG; must be >= 1)
+            overlap: FFT window overlap ratio when averaging
+                 (SPECTRUM_OVERLAP; 0.0 <= overlap < 1.0)
+            base: Base level of 1-byte analyzer data in dB (SPECTRUM_BASE)
+            step: Level step of 1-byte analyzer data in dB (SPECTRUM_STEP)
+            demod_type: Optional demod to set in the same packet (typically
+                 DemodType.SPECT_DEMOD or SPECT2_DEMOD) so a spectrum
+                 channel can be created/retargeted with one command.
+            frequency_hz: Optional center frequency to set in the same packet.
+
         Example:
-            >>> control.set_spectrum(ssrc=12345, bin_bw_hz=100, bin_count=512)
+            >>> control.set_spectrum(ssrc=12345, bin_bw_hz=100, bin_count=512,
+            ...                      window_type=WindowType.HANN_WINDOW,
+            ...                      avg=4, overlap=0.5)
         """
         _validate_ssrc(ssrc)
-        
+
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
-        
+
+        # DEMOD_TYPE / RADIO_FREQUENCY first, mirroring the packet layout
+        # SpectrumStream has always sent (channel setup before analyzer
+        # parameters).
+        if demod_type is not None:
+            if not (0 <= demod_type < DemodType.N_DEMOD):
+                raise ValidationError(
+                    f"Invalid demod_type: {demod_type} "
+                    f"(must be 0-{DemodType.N_DEMOD - 1})"
+                )
+            encode_int(cmdbuffer, StatusType.DEMOD_TYPE, demod_type)
+        if frequency_hz is not None:
+            _validate_frequency(frequency_hz)
+            encode_double(cmdbuffer, StatusType.RADIO_FREQUENCY, frequency_hz)
+
         if bin_bw_hz is not None:
             _validate_positive(bin_bw_hz, "Bin bandwidth")
             encode_float(cmdbuffer, StatusType.RESOLUTION_BW, bin_bw_hz)
@@ -2897,12 +2936,35 @@ class RadiodControl:
             encode_float(cmdbuffer, StatusType.CROSSOVER, crossover_hz)
         if kaiser_beta is not None:
             encode_float(cmdbuffer, StatusType.SPECTRUM_SHAPE, kaiser_beta)
-        
+        if window_type is not None:
+            if window_type < 0:
+                raise ValidationError(
+                    f"window_type must be >= 0, got {window_type}")
+            encode_int(cmdbuffer, StatusType.WINDOW_TYPE, window_type)
+        if avg is not None:
+            if avg < 1:
+                raise ValidationError(f"avg must be >= 1, got {avg}")
+            encode_int(cmdbuffer, StatusType.SPECTRUM_AVG, avg)
+        if overlap is not None:
+            if not (0.0 <= overlap < 1.0):
+                raise ValidationError(
+                    f"overlap must be in [0.0, 1.0), got {overlap}")
+            encode_float(cmdbuffer, StatusType.SPECTRUM_OVERLAP, overlap)
+        if base is not None:
+            encode_float(cmdbuffer, StatusType.SPECTRUM_BASE, base)
+        if step is not None:
+            encode_float(cmdbuffer, StatusType.SPECTRUM_STEP, step)
+
         encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
         encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
         encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting spectrum for SSRC {ssrc}: bw={bin_bw_hz} Hz, bins={bin_count}, crossover={crossover_hz} Hz")
+
+        logger.info(
+            f"Setting spectrum for SSRC {ssrc}: bw={bin_bw_hz} Hz, "
+            f"bins={bin_count}, crossover={crossover_hz} Hz, "
+            f"window={window_type}, avg={avg}, overlap={overlap}, "
+            f"base={base}, step={step}"
+        )
         self.send_command(cmdbuffer)
     
     def set_status_interval(self, ssrc: int, interval: int):
