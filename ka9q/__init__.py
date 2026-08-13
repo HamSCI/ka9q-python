@@ -194,6 +194,7 @@ __all__ = [
 
     # Utilities
     'generate_multicast_ip',
+    'resolve_multicast_address',
     'ChannelMonitor',
 
     # L6 BPSK PPS calibration
@@ -203,6 +204,7 @@ __all__ = [
 ]
 
 from .addressing import generate_multicast_ip
+from .utils import resolve_multicast_address
 from .monitor import ChannelMonitor
 from .compat import KA9Q_RADIO_COMMIT
 from .pps_calibrator import BpskPpsCalibrator, PpsCalibrationResult, NotchFilter500Hz

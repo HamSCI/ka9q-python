@@ -131,5 +131,14 @@ class TestStreamClassesUseHelper(unittest.TestCase):
         self.assertTrue(hasattr(multi_stream, 'join_multicast_all_interfaces'))
 
 
+def test_resolve_multicast_address_is_reexported():
+    """audit F14: hf-timestd reaches into ka9q.utils for this; make it a
+    first-class export so the internals-reach can be retired."""
+    import ka9q
+    from ka9q.utils import resolve_multicast_address as util_fn
+    assert ka9q.resolve_multicast_address is util_fn
+    assert "resolve_multicast_address" in ka9q.__all__
+
+
 if __name__ == '__main__':
     unittest.main()
