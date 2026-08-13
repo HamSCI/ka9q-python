@@ -19,6 +19,7 @@ Control radiod channels for any application: AM/FM/SSB radio, WSPR monitoring, S
 - [Documentation](#documentation)
 - [Examples](#examples)
 - [Use Cases](#use-cases)
+- [Troubleshooting](#troubleshooting)
 - [License](#license)
 
 ## Features
@@ -304,6 +305,49 @@ See [docs/RECIPES.md](docs/RECIPES.md) for worked examples of:
 - **Fixed-channel pipelines** — WSPR, PSK/FT8, HF timing (bundled band plans, `MultiStream`); see companion projects `wspr-recorder`, `psk-recorder`, `hf-timestd`
 - **Nimble channel switching** — single-channel SWL-style retuning driven from the CLI or an app
 - **SDR portability** — ka9q-python talks to `radiod`, which talks to the SDR; reporting frontend capabilities via `FrontendStatus`. Primary tested frontend is the RX888; AirspyR2 and Airspy HF+ support is in development.
+
+## Troubleshooting
+
+### Created channels never appear (silent write-path failure)
+
+**Symptom:** `discover_channels()` works — you can see the radiod's
+existing channels — but every `create_channel()` / `ensure_channel()`
+you issue "succeeds" (no exception from the send), and then the channel
+never shows up. The only visible error is a later
+`TimeoutError: Channel SSRC ... not verified within ...s` or a
+`poll_channel()` that returns `None` — neither of which names the cause.
+
+**Cause:** some hosts carry a kernel route that sends **all
+locally-originated multicast to loopback** (e.g. a `239.0.0.0/8 dev lo`
+entry). Inbound multicast still arrives on the real NIC — so discovery
+(the read path) looks healthy — while every outbound control command is
+routed to `lo` and never reaches radiod. There is no socket error: the
+packet is delivered, just to the wrong interface. This was
+tcpdump-confirmed during the 2026-08-12 audit: `tcpdump -i <nic>` saw
+zero command packets while `tcpdump -i lo` captured all of them
+(sourced from 127.0.0.1).
+
+**Check:**
+
+```bash
+# Substitute the group your radiod status DNS name resolves to:
+ip route get 239.205.73.40
+# BAD:  ... dev lo   src ...   <- commands never leave this host
+# GOOD: ... dev eth0 src ...
+```
+
+**Remedy:** pass your NIC's IP as `interface=` so ka9q-python sets
+`IP_MULTICAST_IF` on the send socket, overriding the kernel route:
+
+```python
+control = RadiodControl("bee1-status.local", interface="192.168.1.176")
+channels = discover_channels("bee1-status.local", interface="192.168.1.176")
+```
+
+**Rule of thumb:** a working `discover_channels()` proves only the
+*read* path. If reads work but writes vanish, check `ip route get`
+first — send-side ACKs don't exist in this protocol, so routing
+misconfiguration is otherwise invisible.
 
 ## License
 
