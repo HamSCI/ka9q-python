@@ -871,10 +871,12 @@ class RadiodControl:
                       group); different client_id OR different radiod ->
                       distinct destinations (peer clients on one station
                       never collide; one client targeting two radiods
-                      sees one destination per radiod).  ``None`` (default)
-                      preserves pre-3.14 behavior: when no ``destination=``
-                      is passed, radiod uses its config-file default and
-                      every client lands on the same group.
+                      sees one destination per radiod).  ``None`` (default):
+                      if the caller also omits ``destination=`` on
+                      create_channel()/ensure_channel(), ValidationError is
+                      raised — there is no config-file fallback client-side
+                      (audit finding F5; before 3.15 this silently fell
+                      through to radiod, which created nothing).
                       client_id is the SUPPORTED way to obtain channel
                       destinations: create_channel()/ensure_channel()
                       derive a deterministic per-(client, radiod) multicast
