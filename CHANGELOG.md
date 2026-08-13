@@ -13,16 +13,21 @@ public capability and one deliberate, owner-ruled behavior change.
   from `client_id` when `destination=` is not given, and raises
   `ValidationError` when *neither* is available** (F5). Previously a
   bare `create_channel()` call with no `client_id` and no
-  `destination=` silently created nothing useful (no address the
-  caller could ever receive on) rather than failing. Any caller that
-  relied on that silent no-op must now pass `client_id=` (recommended)
-  or an explicit `destination=`.
+  `destination=` omitted the `OUTPUT_DATA_DEST_SOCKET` TLV entirely,
+  so radiod created no channel at all, rather than failing loudly on
+  the client side. Any caller that relied on that silent no-op must
+  now pass `client_id=` (recommended) or an explicit `destination=`.
+  One deliberate side effect: for direct `create_channel()` calls that
+  set `client_id`, omit `destination=`, and let the SSRC be
+  auto-allocated, the newly derived destination now participates in
+  the SSRC hash — SSRCs for that specific path differ from what they
+  were pre-3.22.
 
 ### Added
 
-- **`set_spectrum()`** gains `window`, `avg`, `overlap`, `base`, `step`
-  parameters (plus `demod`/`freq`); `SpectrumStream` delegates to it
-  (F11).
+- **`set_spectrum()`** gains `window_type`, `avg`, `overlap`, `base`,
+  `step` parameters (plus `demod_type`/`frequency_hz`); `SpectrumStream`
+  delegates to it (F11).
 - **`ChannelStatus.options`** decodes the `SETOPTS` TLV (F12).
 - **`DemodType.INVALID_DEMOD = -1`** now parses correctly from
   upstream headers (negative enum literals were previously dropped by
@@ -34,8 +39,9 @@ public capability and one deliberate, owner-ruled behavior change.
 ### Fixed
 
 - **`MultiStream` re-sends `agc`/`gain`/filter-edges/requested-encoding**
-  on channel re-creation after a radiod restart — this had regressed
-  silently (F1, P0).
+  on channel re-creation after a radiod restart — these fields were
+  never stored on the `MultiStream` side, so re-creation could not
+  re-assert them; this was an origin bug, not a regression (F1, P0).
 - **`tune()` records `_requested_encoding`** so keepalives re-assert
   the caller's chosen encoding instead of drifting back to the
   channel's current one (F4).

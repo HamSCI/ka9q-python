@@ -253,7 +253,9 @@ class ChannelStatus:
     lock: Optional[bool] = None                # LOCK (channel-level)
     lifetime: Optional[int] = None             # LIFETIME — frames until self-destruct
                                                # (0 = infinite; >0 decrements at the radiod
-                                               # frame rate ≈ 50 Hz; reset to ≥20 s on poll)
+                                               # frame rate ≈ 50 Hz; a bare poll does NOT
+                                               # extend it — only a command carrying a
+                                               # LIFETIME tag refreshes the countdown)
     options: Optional[int] = None              # SETOPTS — demod option bitmask;
                                                # radiod encodes chan->options on
                                                # every status packet (audit F12)

@@ -87,8 +87,15 @@ class SpectrumStream:
             demod_type: SPECT_DEMOD (3) or SPECT2_DEMOD (4, default).
             window_type: FFT window (see WindowType constants).
             kaiser_beta: Kaiser window beta parameter.
-            averaging: Number of FFTs to average per response.
-            overlap: Window overlap ratio (0.0 – 1.0).
+            averaging: Number of FFTs to average per response. Delegated
+                validation (via ``RadiodControl.set_spectrum()``) requires
+                averaging >= 1.
+            overlap: Window overlap ratio. Delegated validation (via
+                ``RadiodControl.set_spectrum()``) requires
+                0.0 <= overlap < 1.0 (note the exclusive upper bound).
+                An out-of-range averaging or overlap value now raises
+                ValidationError when the spectrum command is first sent,
+                rather than being forwarded to radiod as a raw float.
             poll_interval_sec: Seconds between spectrum poll commands.
             on_spectrum: Callback(ChannelStatus) invoked on each spectrum frame.
         """

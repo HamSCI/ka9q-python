@@ -47,13 +47,13 @@ The `RadiodControl` class is the primary interface for sending commands to `radi
 ### Step 2: Connect to radiod
 
 ```python
-control = RadiodControl("radiod.local")
+control = RadiodControl("radiod.local", client_id="getting-started")
 ```
 
-Replace `"radiod.local"` with the mDNS name or IP address of your `radiod` instance. If you're on a multi-homed system (multiple network interfaces), you may need to specify which interface to use:
+Replace `"radiod.local"` with the mDNS name or IP address of your `radiod` instance. `client_id` identifies this application so ka9q-python can derive a per-client multicast destination for the channels you create. If you're on a multi-homed system (multiple network interfaces), you may need to specify which interface to use:
 
 ```python
-control = RadiodControl("radiod.local", interface="192.168.1.100")
+control = RadiodControl("radiod.local", client_id="getting-started", interface="192.168.1.100")
 ```
 
 ### Step 3: Create a Channel
@@ -89,7 +89,7 @@ Here's the full program:
 from ka9q import RadiodControl
 
 # Connect to radiod
-control = RadiodControl("radiod.local")
+control = RadiodControl("radiod.local", client_id="getting-started")
 
 # Create AM channel for WWV 10 MHz
 control.create_channel(
@@ -194,7 +194,7 @@ def on_stream_restored(channel):
     print(f"✓ Stream restored: {channel.frequency/1e6:.3f} MHz")
 
 # Connect to radiod
-control = RadiodControl("radiod.local")
+control = RadiodControl("radiod.local", client_id="getting-started")
 
 # Create a self-healing stream
 stream = ManagedStream(

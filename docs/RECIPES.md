@@ -161,7 +161,7 @@ def make_callback(label):
         handle(label, samples, quality)
     return on_samples
 
-with RadiodControl("bee3-status.local") as control:
+with RadiodControl("bee3-status.local", client_id="band-recorder") as control:
     multi = MultiStream(control=control)
     for label, fhz, preset, rate in BAND_PLAN:
         multi.add_channel(
@@ -241,7 +241,7 @@ retune it in place.
 ```python
 from ka9q import RadiodControl, ManagedStream
 
-with RadiodControl("bee1-hf-status.local") as control:
+with RadiodControl("bee1-hf-status.local", client_id="swl-tuner") as control:
     stream = ManagedStream(
         control=control,
         frequency_hz=14.074e6,
@@ -323,7 +323,7 @@ For a desktop-style tuner, the usual shape is:
 ```python
 class Receiver:
     def __init__(self, host):
-        self._control = RadiodControl(host)
+        self._control = RadiodControl(host, client_id="swl-tuner")
         self._stream = ManagedStream(
             control=self._control,
             frequency_hz=14.200e6,
@@ -653,7 +653,7 @@ frequency with `ManagedStream`. Both use the same `RadiodControl`:
 ```python
 from ka9q import RadiodControl, SpectrumStream, ManagedStream
 
-with RadiodControl("radiod.local") as ctl:
+with RadiodControl("radiod.local", client_id="spectrogram-demo") as ctl:
     # Wideband spectrum display
     spectrum = SpectrumStream(
         control=ctl,

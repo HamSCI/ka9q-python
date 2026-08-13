@@ -72,7 +72,7 @@ pip install -e .
 from ka9q import RadiodControl
 
 # Connect to radiod (default test host: bee1-hf-status.local)
-control = RadiodControl("bee1-hf-status.local")
+control = RadiodControl("bee1-hf-status.local", client_id="am-demo")
 
 # Create AM channel on 10 MHz WWV
 control.create_channel(
@@ -90,7 +90,7 @@ control.create_channel(
 ```python
 from ka9q import RadiodControl, Encoding
 
-control = RadiodControl("bee1-hf-status.local")
+control = RadiodControl("bee1-hf-status.local", client_id="hq-encoding-demo")
 
 # Create a channel with 32-bit float output (highest quality)
 control.ensure_channel(
@@ -106,7 +106,7 @@ control.ensure_channel(
 ```python
 from ka9q import RadiodControl
 
-control = RadiodControl("bee1-hf-status.local")
+control = RadiodControl("bee1-hf-status.local", client_id="wspr-demo")
 
 wspr_bands = [
     (1.8366e6, "160m"),
@@ -183,7 +183,7 @@ ensure your channels survive radiod restarts:
 ```python
 from ka9q import RadiodControl, ChannelMonitor
 
-control = RadiodControl("bee1-hf-status.local")
+control = RadiodControl("bee1-hf-status.local", client_id="monitor-demo")
 monitor = ChannelMonitor(control)
 monitor.start()
 
@@ -200,7 +200,7 @@ monitor.monitor_channel(
 `radiod` removes channels by polling for streams whose frequency is set to `0 Hz`. Always call `remove_channel(ssrc)` (or explicitly set `set_frequency(ssrc, 0.0)` if you build TLVs yourself) when tearing down a stream so the background poller can reclaim it:
 
 ```python
-with RadiodControl("bee1-hf-status.local") as control:
+with RadiodControl("bee1-hf-status.local", client_id="cleanup-demo") as control:
     info = control.ensure_channel(
         frequency_hz=10e6,
         preset="iq",

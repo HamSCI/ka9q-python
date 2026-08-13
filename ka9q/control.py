@@ -875,7 +875,7 @@ class RadiodControl:
                       if the caller also omits ``destination=`` on
                       create_channel()/ensure_channel(), ValidationError is
                       raised — there is no config-file fallback client-side
-                      (audit finding F5; before 3.15 this silently fell
+                      (audit finding F5; before 3.22 this silently fell
                       through to radiod, which created nothing).
                       client_id is the SUPPORTED way to obtain channel
                       destinations: create_channel()/ensure_channel()
@@ -1814,8 +1814,8 @@ class RadiodControl:
         
         Example:
             >>> from ka9q import RadiodControl, RadiodStream
-            >>> 
-            >>> with RadiodControl("radiod.local") as control:
+            >>>
+            >>> with RadiodControl("radiod.local", client_id="my-app") as control:
             ...     # Request a channel - ka9q-python handles all the details
             ...     channel = control.ensure_channel(
             ...         frequency_hz=14.074e6,
@@ -2022,7 +2022,7 @@ class RadiodControl:
             ValidationError: If SSRC is invalid
             
         Example:
-            >>> control = RadiodControl("radiod.local")
+            >>> control = RadiodControl("radiod.local", client_id="my-app")
             >>> control.create_channel(ssrc=14074000, frequency_hz=14.074e6)
             >>> # ... use channel ...
             >>> control.remove_channel(ssrc=14074000)  # Mark for removal
@@ -2418,7 +2418,7 @@ class RadiodControl:
             Dictionary containing performance and error metrics
             
         Example:
-            >>> control = RadiodControl("radiod.local")
+            >>> control = RadiodControl("radiod.local", client_id="my-app")
             >>> control.create_channel(ssrc=12345, frequency_hz=14.074e6)
             >>> metrics = control.get_metrics()
             >>> print(f"Success rate: {metrics['success_rate']:.1%}")
