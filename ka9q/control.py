@@ -3140,8 +3140,21 @@ class RadiodControl:
     # ------------------------------------------------------------------
 
     def set_lock(self, ssrc: int, lock: bool):
-        """Lock/unlock the tuner (ignore retune commands when locked)."""
+        """Lock/unlock the tuner (ignore retune commands when locked).
+
+        WARNING: this is currently a SILENT NO-OP against real radiod.
+        ka9q-radio's ``decode_radio_commands()`` has no ``case LOCK:``
+        handler as of the audited head (cedec349, 2026-08-12), so radiod
+        discards the (correctly encoded) TLV and the tuner is NOT
+        protected, even though this call returns normally (audit finding
+        F6).  A warning is logged on every call so the no-op is visible;
+        remove the warning once upstream adds a LOCK command handler.
+        """
         _validate_ssrc(ssrc)
+        logger.warning(
+            "set_lock(ssrc=%s): radiod has no LOCK command handler — this "
+            "command will be silently ignored (audit finding F6)", ssrc
+        )
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
         encode_int(cmdbuffer, StatusType.LOCK, 1 if lock else 0)
