@@ -88,6 +88,32 @@ def get_git_commit(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
+def is_reachable_from_remote(repo_path: Path, commit: str,
+                             remote: str = "origin") -> bool:
+    """Is ``commit`` contained in any branch of ``remote``?
+
+    sigmond's ``_install_radiod_native()`` clones UPSTREAM ka9q-radio and
+    checks the compat pin out, so a pin that lives only on a fork is not
+    merely wrong — it is unbuildable.  On 2026-08-15 a pin written while
+    the local checkout sat on a fork-only merge branch killed the golden
+    template build four hours later with "unable to read tree".
+
+    Answers False when it cannot tell (no such remote, git error): a
+    refusal to answer must never read as "yes".
+    """
+    try:
+        subprocess.run(["git", "-C", str(repo_path), "fetch", "-q", remote],
+                       capture_output=True, text=True, timeout=120)
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "branch", "-r", "--contains", commit,
+             f"{remote}/*"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
 # ---------------------------------------------------------------------------
 # types.py parser — reads the CURRENT file to learn what Python already has
 # ---------------------------------------------------------------------------
@@ -383,6 +409,18 @@ def main() -> int:
         "# Updated by: scripts/sync_types.py --apply\n"
         f"{commit}\n"
     )
+    if not is_reachable_from_remote(radio_path, commit):
+        print(
+            f"REFUSING to pin {commit[:12]}: it is not reachable from the "
+            f"upstream remote.\n"
+            f"  sigmond clones UPSTREAM ka9q-radio and checks this commit "
+            f"out, so a fork-only pin makes the golden image unbuildable "
+            f"(2026-08-15: 'unable to read tree', radiod never built).\n"
+            f"  Push the commit upstream, or check out an upstream commit "
+            f"before running --apply.",
+            file=sys.stderr,
+        )
+        return 1
     COMPAT_FILE.write_text(pin_content)
     print(f"Updated {COMPAT_FILE} → {commit[:12]}")
 
