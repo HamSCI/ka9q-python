@@ -623,6 +623,27 @@ class MultiStream:
 
     # ── delivery ──
 
+    @staticmethod
+    def _account_delivery(slot: _ChannelSlot, combined, gaps) -> None:
+        """Book one delivered batch against the completeness counters.
+
+        `completeness_pct` computes
+        `(delivered - gaps_filled) / expected`, but MultiStream only ever
+        set `delivered`.  With `expected` left at 0 the property took its
+        early return and reported a hardcoded 100.0 no matter what was
+        lost — on every recorder built on MultiStream, which is all the
+        multiplexing ones.  AC0G-B4 2026-08-15 logged 42 gaps totalling
+        93,600 samples in 25 minutes while completeness read 100.0%.
+
+        Gap fills keep the sample count whole, so `expected` tracks
+        `delivered` and the loss is carried by `gaps_filled`.
+        """
+        n = len(combined)
+        slot.quality.total_samples_delivered += n
+        slot.quality.total_samples_expected += n
+        slot.quality.total_gaps_filled += sum(
+            g.duration_samples for g in gaps)
+
     def _deliver(self, slot: _ChannelSlot) -> None:
         if not slot.sample_buffer or slot.on_samples is None:
             slot.sample_buffer.clear()
@@ -634,7 +655,7 @@ class MultiStream:
         combined = np.concatenate(slot.sample_buffer)
         n = len(combined)
 
-        slot.quality.total_samples_delivered += n
+        self._account_delivery(slot, combined, slot.gap_buffer)
         slot.quality.batch_samples_delivered = n
         slot.quality.batch_gaps = list(slot.gap_buffer)
         slot.quality.sample_rate = slot.sample_rate
