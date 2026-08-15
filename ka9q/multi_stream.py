@@ -524,11 +524,17 @@ class MultiStream:
             )
             output, gaps = slot.resequencer.process_packet(packet)
 
+            # Harvest gaps unconditionally.  A radiod zero-block marker
+            # can be reported for a packet that produced no output yet
+            # (arrived out of order and is still buffered); collecting
+            # only inside the branch below discarded it, and the stall
+            # went silent one layer further up.
+            slot.gap_buffer.extend(gaps)
+
             if output is not None and len(output) > 0:
                 if not slot.sample_buffer:
                     slot.pending_rtp_start = slot.resequencer.last_chunk_rtp_start
                 slot.sample_buffer.append(output)
-                slot.gap_buffer.extend(gaps)
                 slot.packets_since_delivery += 1
 
                 if slot.packets_since_delivery >= slot.deliver_interval:

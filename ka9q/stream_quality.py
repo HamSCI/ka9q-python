@@ -32,6 +32,19 @@ class GapSource(Enum):
     
     RESEQUENCE_TIMEOUT = "resequence_timeout"
     """Packet arrived after resequence window expired"""
+
+    RADIOD_BLOCK_DROP = "radiod_block_drop"
+    """radiod dropped a filter output block and emitted zeros in its place.
+
+    Since ka9q-radio 55d9048d (2026.08.15-1-trixie1) a lapped output
+    block is counted and zero-filled rather than skipped, which keeps
+    sample counts honest but leaves RTP timestamps CONTIGUOUS -- so no
+    timestamp gap exists for the resequencer to find.  The zeros
+    themselves are the signal: a solid block of exact IEEE-754 zeros
+    across every sample does not occur in real RF, where ~144 dB of
+    instantaneous float dynamic range means noise always occupies the
+    low bits.  Distinct from NETWORK_LOSS: the packets DID arrive, and
+    the samples they carry are synthetic rather than missing."""
     
     EMPTY_PAYLOAD = "empty_payload"
     """RTP packet received but payload was empty/zeros"""

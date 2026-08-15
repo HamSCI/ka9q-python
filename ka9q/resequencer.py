@@ -157,11 +157,47 @@ class PacketResequencer:
             self.stats.packets_duplicate += 1
             return None, []
         
+        # radiod zero-fills a dropped output block, so this packet may
+        # carry synthetic samples with a perfectly contiguous timestamp.
+        # Detect it here, before the resequencer -- which by definition
+        # cannot see it, there being no timestamp gap to find.
+        zero_gap = self._detect_zero_block(packet)
+
         # Add to buffer
         self._add_to_buffer(packet)
         
         # Try to output packets in sequence order
-        return self._try_output()
+        samples, gaps = self._try_output()
+        if zero_gap is not None:
+            gaps = list(gaps) + [zero_gap]
+        return samples, gaps
+
+    def _detect_zero_block(self, packet: RTPPacket) -> Optional[GapEvent]:
+        """A packet of nothing but exact zeros is radiod's drop marker.
+
+        Cheap on the hot path: real samples almost always have a
+        non-zero first element, so the full scan is only reached for
+        packets that are already suspect.
+        """
+        samples = packet.samples
+        if samples is None or len(samples) == 0:
+            return None
+        if samples[0] != 0 or samples.any():
+            return None
+        n = len(samples)
+        self.stats.samples_filled += n
+        logger.warning(
+            f"radiod block drop: {n} zero samples "
+            f"({n / self.sample_rate * 1000:.1f} ms) at seq={packet.sequence} "
+            f"-- synthetic, not received signal"
+        )
+        return GapEvent(
+            source=GapSource.RADIOD_BLOCK_DROP,
+            position_samples=self.cumulative_samples,
+            duration_samples=n,
+            timestamp_utc=datetime.now(timezone.utc).isoformat(),
+            packets_affected=1,
+        )
     
     def _initialize(self, packet: RTPPacket):
         """Initialize sequencer with first packet"""
