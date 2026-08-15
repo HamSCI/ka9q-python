@@ -1,3 +1,7 @@
 # ka9q-radio commit that ka9q/types.py was last validated against
 # Updated by: scripts/sync_types.py --apply
-7fca458a09e43f154d1980dbac3b1c4555cc862b
+# ⚠ MUST be reachable from ka9q/ka9q-radio (upstream): sigmond's
+# _install_radiod_native() clones UPSTREAM and checks this commit out.
+# A fork-only commit here fails the clone and the golden image build
+# dies with 'radiod binary not found' (2026-08-15).
+cd44bbdd76aa042aaedaf1a912bef9a4fc60f714
