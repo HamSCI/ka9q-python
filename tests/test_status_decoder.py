@@ -177,3 +177,49 @@ def test_options_none_when_absent():
     pkt = _build_packet(("int", StatusType.OUTPUT_SSRC, 42))
     st = decode_status_packet(pkt)
     assert st.options is None
+
+
+class TestFilterDropsBothDecoders:
+    """FILTER_DROPS (tag 77) must decode identically in both paths.
+
+    ``decode_status_packet`` builds the full typed ``ChannelStatus`` and
+    has always handled the tag.  ``decode_status_dict`` is the
+    lightweight decoder ``StatusListener`` runs on every broadcast, and
+    it silently skipped unknown tags -- so radiod's per-channel output
+    drop counter was decodable in the path nothing polls and invisible
+    in the path every long-running client uses.
+    """
+
+    def _pkt(self, drops: int) -> bytes:
+        return _build_packet(
+            ("int", StatusType.OUTPUT_SSRC, 811028291),
+            ("int", StatusType.FILTER_DROPS, drops),
+        )
+
+    def test_typed_decoder(self):
+        st = decode_status_packet(self._pkt(443))
+        assert st is not None
+        assert st.filter_drops == 443
+
+    def test_dict_decoder(self):
+        from ka9q.control import decode_status_dict
+        status = decode_status_dict(self._pkt(443))
+        assert status["filter_drops"] == 443
+
+    def test_the_two_decoders_agree(self):
+        from ka9q.control import decode_status_dict
+        pkt = self._pkt(14509)
+        assert decode_status_dict(pkt)["filter_drops"] == \
+            decode_status_packet(pkt).filter_drops
+
+    def test_absent_tag_yields_no_key(self):
+        # A radiod that predates the tag must not be reported as zero
+        # drops -- absent and "no drops" are different claims.
+        from ka9q.control import decode_status_dict
+        pkt = _build_packet(("int", StatusType.OUTPUT_SSRC, 1))
+        assert "filter_drops" not in decode_status_dict(pkt)
+        assert decode_status_packet(pkt).filter_drops is None
+
+    def test_zero_is_preserved_not_dropped(self):
+        from ka9q.control import decode_status_dict
+        assert decode_status_dict(self._pkt(0))["filter_drops"] == 0

@@ -53,10 +53,13 @@ def _make_channel(ssrc: int) -> ChannelInfo:
 
 
 def _make_status(ssrc: int, gps_time: int, rtp_timesnap: int,
-                 encoding: int | None = None) -> dict:
+                 encoding: int | None = None,
+                 filter_drops: int | None = None) -> dict:
     s = {"ssrc": ssrc, "gps_time": gps_time, "rtp_timesnap": rtp_timesnap}
     if encoding is not None:
         s["encoding"] = encoding
+    if filter_drops is not None:
+        s["filter_drops"] = filter_drops
     return s
 
 
@@ -99,6 +102,60 @@ def test_apply_update_refreshes_encoding_when_present():
     listener._apply_update(1, _make_status(1, 10, 20, encoding=6),
                            10, 20)
     assert ci.encoding == 6
+
+
+class TestFilterDropsReachesTheListener:
+    """radiod's own output-drop counter, made visible to long-running
+    clients.  ``decode_status_packet`` has always decoded FILTER_DROPS
+    into ``ChannelStatus``; the lightweight decoder ``StatusListener``
+    runs on every broadcast skipped it, so the count never reached a
+    client tracking channels through the listener.
+    """
+
+    def test_refreshes_when_present(self):
+        listener = _bare_listener()
+        ci = _make_channel(ssrc=1)
+        listener.register_channel(ci)
+
+        listener._apply_update(1, _make_status(1, 10, 20, filter_drops=318),
+                               10, 20)
+        assert ci.filter_drops == 318
+
+    def test_none_until_a_broadcast_carries_the_tag(self):
+        # An older radiod, or a status packet that simply omits the tag,
+        # must leave the field unset rather than implying zero drops.
+        listener = _bare_listener()
+        ci = _make_channel(ssrc=1)
+        listener.register_channel(ci)
+        assert ci.filter_drops is None
+
+        listener._apply_update(1, _make_status(1, 10, 20), 10, 20)
+        assert ci.filter_drops is None
+
+    def test_absent_tag_does_not_clear_a_known_count(self):
+        # Losing the count to a packet that omits the tag would look like
+        # radiod resetting, and a consumer differencing the series would
+        # read a spurious negative delta.
+        listener = _bare_listener()
+        ci = _make_channel(ssrc=1)
+        listener.register_channel(ci)
+
+        listener._apply_update(1, _make_status(1, 10, 20, filter_drops=318),
+                               10, 20)
+        listener._apply_update(1, _make_status(1, 30, 40), 30, 40)
+        assert ci.filter_drops == 318
+
+    def test_counter_is_cumulative_so_consumers_difference_it(self):
+        listener = _bare_listener()
+        ci = _make_channel(ssrc=1)
+        listener.register_channel(ci)
+
+        listener._apply_update(1, _make_status(1, 10, 20, filter_drops=318),
+                               10, 20)
+        first = ci.filter_drops
+        listener._apply_update(1, _make_status(1, 30, 40, filter_drops=443),
+                               30, 40)
+        assert ci.filter_drops - first == 125
 
 
 def test_apply_update_does_not_refresh_frequency_or_sample_rate():

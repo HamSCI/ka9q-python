@@ -799,6 +799,21 @@ def decode_status_dict(buffer: bytes) -> dict:
                 else:
                     _TTL_ZERO_WARNED.add(ssrc)
                     logger.warning(msg)
+        elif type_val == StatusType.FILTER_DROPS:
+            # radiod's count of output blocks this channel's demod thread
+            # lapped.  Since ka9q-radio 55d9048d each lapped block is
+            # counted here AND emitted as a block of zeros, so the sample
+            # timeline stays intact and the loss shows up in the data --
+            # which makes this counter cross-checkable against
+            # ``PacketResequencer``'s zero-block detection rather than
+            # something a client has to take on trust.
+            #
+            # ``decode_status_packet`` has decoded it into
+            # ``ChannelStatus.filter_drops`` all along; this lightweight
+            # decoder -- the one ``StatusListener`` runs on every
+            # broadcast -- silently skipped it, so the per-channel drop
+            # count was invisible to every long-running client.
+            status['filter_drops'] = decode_int(data, optlen)
         elif type_val == StatusType.LIFETIME:
             status['lifetime'] = decode_int(data, optlen)
         elif type_val == StatusType.DESCRIPTION:

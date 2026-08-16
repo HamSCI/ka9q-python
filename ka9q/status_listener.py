@@ -475,6 +475,15 @@ class StatusListener:
         if enc is not None:
             ci.encoding = enc
 
+        # Cumulative per-channel output block drops.  Refreshed here so a
+        # long-running client can watch radiod's own loss counter without
+        # opening a second status socket -- differencing it across two
+        # reads is the honest measurement; the level alone is meaningless
+        # because it accumulates from radiod start.
+        drops = status.get("filter_drops")
+        if drops is not None:
+            ci.filter_drops = drops
+
         self.stats.updates_applied += 1
 
         for cb in per_ssrc_callbacks:

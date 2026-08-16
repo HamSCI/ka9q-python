@@ -136,7 +136,7 @@
   "signatures": {
     "ka9q.compat:KA9Q_RADIO_COMMIT": null,
     "ka9q.control:RadiodControl": "(status_address: str, max_commands_per_sec: int = 100, interface: Optional[str] = None, client_id: Optional[str] = None)",
-    "ka9q.discovery:ChannelInfo": "(ssrc: int, preset: str, sample_rate: int, frequency: float, snr: float, multicast_address: str, port: int, gps_time: Optional[int] = None, rtp_timesnap: Optional[int] = None, encoding: int = 0, chain_delay_correction_ns: Optional[int] = None, anchor_epoch: int = 0, last_offset_step_sec: Optional[float] = None, anchor_step_threshold_sec: float = 0.75) -> None",
+    "ka9q.discovery:ChannelInfo": "(ssrc: int, preset: str, sample_rate: int, frequency: float, snr: float, multicast_address: str, port: int, gps_time: Optional[int] = None, rtp_timesnap: Optional[int] = None, encoding: int = 0, chain_delay_correction_ns: Optional[int] = None, anchor_epoch: int = 0, last_offset_step_sec: Optional[float] = None, anchor_step_threshold_sec: float = 0.75, filter_drops: Optional[int] = None) -> None",
     "ka9q.discovery:discover_channels": "(status_address: str, listen_duration: float = 2.0, use_native: bool = True, interface: Optional[str] = None) -> Dict[int, ka9q.discovery.ChannelInfo]",
     "ka9q.discovery:discover_radiod_services": "(timeout: float = 10.0)",
     "ka9q.rtp_recorder:BILLION": null,
@@ -146,7 +146,7 @@
     "ka9q.status_listener:StatusListener": "(status_address: 'str', interface: 'Optional[str]' = None, status_port: 'int' = 5006, socket_timeout: 'float' = 0.5)",
     "ka9q.stream:RadiodStream": "(channel: ka9q.discovery.ChannelInfo, on_samples: Optional[Callable[[numpy.ndarray, ka9q.stream_quality.StreamQuality], NoneType]] = None, samples_per_packet: int = 320, resequence_buffer_size: int = 64, deliver_interval_packets: int = 10)",
     "ka9q.utils:resolve_multicast_address": "(address: str, timeout: float = 5.0) -> str",
-    "ka9q:ChannelInfo": "(ssrc: int, preset: str, sample_rate: int, frequency: float, snr: float, multicast_address: str, port: int, gps_time: Optional[int] = None, rtp_timesnap: Optional[int] = None, encoding: int = 0, chain_delay_correction_ns: Optional[int] = None, anchor_epoch: int = 0, last_offset_step_sec: Optional[float] = None, anchor_step_threshold_sec: float = 0.75) -> None",
+    "ka9q:ChannelInfo": "(ssrc: int, preset: str, sample_rate: int, frequency: float, snr: float, multicast_address: str, port: int, gps_time: Optional[int] = None, rtp_timesnap: Optional[int] = None, encoding: int = 0, chain_delay_correction_ns: Optional[int] = None, anchor_epoch: int = 0, last_offset_step_sec: Optional[float] = None, anchor_step_threshold_sec: float = 0.75, filter_drops: Optional[int] = None) -> None",
     "ka9q:Encoding": "()",
     "ka9q:MultiStream": "(control, drop_timeout_sec: float = 15.0, restore_interval_sec: float = 5.0, deliver_interval_packets: int = 10, samples_per_packet: int = 320, resequence_buffer_size: int = 64, gap_storm_rate_per_sec: float = 25.0, gap_storm_window_sec: Optional[float] = None)",
     "ka9q:RTPHeader": "(version: int, padding: bool, extension: bool, csrc_count: int, marker: bool, payload_type: int, sequence: int, timestamp: int, ssrc: int)",

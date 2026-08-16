@@ -82,6 +82,17 @@ class ChannelInfo:
     # per-band abs-divergence check remains the backstop for real sustained drift.
     anchor_step_threshold_sec: float = 0.75  # |move| beyond this ⇒ a step (configurable)
 
+    # radiod's cumulative count of output blocks this channel's demod thread
+    # lapped (FILTER_DROPS).  Appended last so the addition is purely
+    # additive — no existing positional construction shifts.
+    #
+    # CUMULATIVE since the radiod process started, so consumers must
+    # DIFFERENCE it; a level on its own says nothing about current loss.
+    # ``None`` until a STATUS broadcast carrying the tag has been seen —
+    # absent and "zero drops" are different claims and must not be
+    # conflated.
+    filter_drops: Optional[int] = None
+
     def __post_init__(self):
         # Seed the atomic-pair snapshot from the constructor args if both
         # were provided.  Lets ``get_anchor`` return the construction-time

@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Added
+
+- **`FILTER_DROPS` (tag 77) now decodes in `decode_status_dict()`, and is
+  carried on `ChannelInfo.filter_drops`.** radiod's per-channel count of
+  output blocks its demod thread lapped was decodable only in
+  `decode_status_packet()` → `ChannelStatus.filter_drops` — the typed
+  decoder nothing polls continuously. The lightweight decoder that
+  `StatusListener` runs on *every* broadcast silently skipped the tag, and
+  since listener callbacks receive a `ChannelInfo` rather than the status
+  dict, the counter never reached a long-running client at all. Measuring
+  radiod's own loss therefore meant either `metadump` (which follows one
+  stream, not the fleet) or hand-rolling a TLV walk.
+
+  This matters more since ka9q-radio `55d9048d`: a lapped block is now
+  counted *and* emitted as a block of zeros, so `PacketResequencer`'s
+  zero-block detection and this counter are two independent views of the
+  same event. Cross-checking them is what makes either trustworthy — the
+  same test that showed the pre-`55d9048d` counter accounted for only
+  6–15% of real timeline loss.
+
+  Two properties callers must respect, both covered by tests:
+
+  - The counter is **cumulative since radiod started**. Difference it
+    across two reads; a level on its own says nothing about current loss.
+  - **Absent ≠ zero.** A status packet without the tag leaves
+    `filter_drops` as `None` and does not clear a previously known count
+    — clearing it would read as a counter reset and produce a spurious
+    negative delta.
+
+  `ChannelInfo.filter_drops` is appended as the last field, so the change
+  is purely additive for positional construction. `client_usage_manifest.json`
+  is updated accordingly; the two signature entries were edited by hand
+  because `scripts/gen_client_manifest.py` scans `/opt/git/sigmond`, which
+  is not present on a dev box — re-run it on an appliance to confirm.
+
 ### Deprecated
 
 - **`rtp_to_wallclock()` now emits `DeprecationWarning` on every call**
