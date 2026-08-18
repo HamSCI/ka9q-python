@@ -4,6 +4,40 @@
 
 ### Added
 
+- **`raw_payloads=True` on `RadiodStream` and `ManagedStream`: deliver
+  undecoded RTP payloads for the framed encodings.** `parse_rtp_samples()`
+  deliberately returns `None` for OPUS/OPUS_VOIP/AX25 — they have no
+  raw-sample representation — and `_process_packet` drops a `None`, so a
+  stream on any of those encodings ran healthy and silent: packets arrived,
+  the callback never fired, and nothing logged. The only way to consume an
+  Opus channel was `OpusDecoder`, i.e. decoding to PCM.
+
+  That is the wrong shape for a consumer that wants the codec frames
+  themselves — forwarding Opus to a browser's WebCodecs decoder, or writing
+  an Ogg/AX25 file — where decoding to PCM and re-encoding is pure loss.
+  With `raw_payloads=True`, `on_samples` receives a `List[bytes]`, one
+  entry per RTP packet in arrival order, and with
+  `deliver_interval_packets=1` that is exactly one frame per call.
+
+  Two properties callers must respect:
+
+  - The resequencer is **bypassed**. A codec frame is opaque: it can be
+    neither concatenated nor zero-filled, and gap concealment belongs to
+    the decoder (Opus has built-in PLC). Loss and reorder therefore surface
+    to the caller, which for a sequenced transport like TCP/WebSocket is
+    exactly right, and for a lossy one means the caller owns concealment.
+  - Quality accounting switches to **frames, not samples**:
+    `batch_samples_delivered` and `total_samples_expected` count RTP
+    packets, and the resequencer statistics stay zero because it never ran.
+
+  `stop()` no longer flushes the resequencer in this mode — its ndarray
+  output would otherwise be appended to a buffer of `bytes` and blow up in
+  `np.concatenate` on the final delivery.
+
+  The parameter is additive and defaults to `False`; the sample path is
+  unchanged. `tests/client_usage_manifest.json` is updated for the new
+  signature.
+
 - **`FILTER_DROPS` (tag 77) now decodes in `decode_status_dict()`, and is
   carried on `ChannelInfo.filter_drops`.** radiod's per-channel count of
   output blocks its demod thread lapped was decodable only in

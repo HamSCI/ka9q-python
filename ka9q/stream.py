@@ -263,6 +263,7 @@ class RadiodStream:
         samples_per_packet: int = 320,
         resequence_buffer_size: int = 64,
         deliver_interval_packets: int = 10,
+        raw_payloads: bool = False,
     ):
         """
         Initialize RadiodStream.
@@ -273,11 +274,31 @@ class RadiodStream:
             samples_per_packet: Expected samples per RTP packet (320 @ 16kHz)
             resequence_buffer_size: Packets to buffer for resequencing (64 = ~2s)
             deliver_interval_packets: Deliver to callback every N packets (batching)
+            raw_payloads: Deliver undecoded RTP payloads instead of samples.
+                ``on_samples`` then receives a ``List[bytes]`` — one entry per
+                RTP packet, in arrival order — rather than an ``np.ndarray``.
+
+                This is the transport mode for the *framed* encodings that
+                ``parse_rtp_samples()`` deliberately does not decode: OPUS,
+                OPUS_VOIP and AX25.  Without it those payloads are dropped
+                (``_parse_samples`` returns None) and the callback never fires.
+
+                Use it when the consumer wants the codec frames themselves —
+                forwarding Opus to a browser's WebCodecs decoder, or writing
+                an Ogg/AX25 file — rather than PCM.  To get PCM from an Opus
+                channel instead, decode the frames with :class:`OpusDecoder`.
+
+                The resequencer is bypassed: a codec frame is opaque, so it
+                can be neither concatenated nor zero-filled, and gap
+                concealment belongs to the decoder (Opus has built-in PLC).
+                Loss/reorder therefore surface to the consumer, which for a
+                sequenced transport like TCP/WebSocket is exactly right.
         """
         self.channel = channel
         self.on_samples = on_samples
         self.samples_per_packet = samples_per_packet
         self.deliver_interval_packets = deliver_interval_packets
+        self.raw_payloads = raw_payloads
         
         # Resequencer
         self.resequencer = PacketResequencer(
@@ -289,7 +310,8 @@ class RadiodStream:
         # Quality tracking
         self.quality = StreamQuality()
         
-        # Sample accumulator for batched delivery
+        # Sample accumulator for batched delivery.  In raw_payloads mode the
+        # entries are `bytes` (one RTP payload each) instead of arrays.
         self._sample_buffer: List[np.ndarray] = []
         self._gap_buffer: List[GapEvent] = []
         self._pending_rtp_start = None
@@ -359,12 +381,17 @@ class RadiodStream:
             self._thread.join(timeout=5.0)
             self._thread = None
         
-        # Flush resequencer
-        final_samples, final_gaps = self.resequencer.flush()
-        if len(final_samples) > 0 or final_gaps:
-            self._sample_buffer.append(final_samples)
-            self._gap_buffer.extend(final_gaps)
+        # Flush resequencer.  In raw_payloads mode it never ran, and its
+        # ndarray output must not be mixed into a buffer of codec frames —
+        # just deliver whatever frames are still pending.
+        if self.raw_payloads:
             self._deliver_samples()
+        else:
+            final_samples, final_gaps = self.resequencer.flush()
+            if len(final_samples) > 0 or final_gaps:
+                self._sample_buffer.append(final_samples)
+                self._gap_buffer.extend(final_gaps)
+                self._deliver_samples()
         
         logger.info(
             f"RadiodStream stopped. Completeness: {self.quality.completeness_pct:.1f}%, "
@@ -581,6 +608,21 @@ class RadiodStream:
             self._record_empty_payload(header)
             return
         
+        # Raw-payload mode: the payload is an opaque codec frame.  Buffer it
+        # verbatim and skip both the sample parser and the resequencer, which
+        # can only operate on numeric samples.
+        if self.raw_payloads:
+            self._sample_buffer.append(payload)
+            self._packets_since_delivery += 1
+            if self._packets_since_delivery >= self.deliver_interval_packets:
+                self._deliver_samples()
+            wallclock = rtp_to_utc(header.timestamp, self.channel)
+            if wallclock:
+                self.quality.last_packet_utc = datetime.fromtimestamp(
+                    wallclock, tz=timezone.utc
+                ).isoformat()
+            return
+        
         # Parse samples from payload
         samples = self._parse_samples(payload)
         if samples is None:
@@ -649,28 +691,40 @@ class RadiodStream:
         if not self._sample_buffer:
             return
         
-        # Combine samples
-        samples = np.concatenate(self._sample_buffer)
+        # Combine samples.  Opaque codec frames stay a list of bytes — they
+        # have no numeric representation to concatenate — and their "sample"
+        # count is a frame count.
+        if self.raw_payloads:
+            samples = list(self._sample_buffer)
+            n_units = len(samples)
+        else:
+            samples = np.concatenate(self._sample_buffer)
+            n_units = len(samples)
         gaps = list(self._gap_buffer)
         
         # Update quality for this batch
         batch_start = self.quality.total_samples_delivered
         self.quality.batch_start_sample = batch_start
         self.quality.delivered_rtp_start = self._pending_rtp_start
-        self.quality.batch_samples_delivered = len(samples)
+        self.quality.batch_samples_delivered = n_units
         self.quality.batch_gaps = gaps
-        self.quality.total_samples_delivered += len(samples)
+        self.quality.total_samples_delivered += n_units
         
-        # Update expected samples (based on actual payload samples per packet)
-        self.quality.total_samples_expected = (
-            self.quality.rtp_packets_received * self._payload_samples_per_packet
-        )
-        
-        # Update RTP loss stats from resequencer
-        reseq_stats = self.resequencer.get_stats()
-        self.quality.rtp_packets_lost = reseq_stats.get('gaps_detected', 0)
-        self.quality.rtp_packets_resequenced = reseq_stats.get('packets_resequenced', 0)
-        self.quality.rtp_packets_duplicate = reseq_stats.get('packets_duplicate', 0)
+        if self.raw_payloads:
+            # One delivered unit per RTP packet, so "expected" is the packet
+            # count.  Resequencer stats stay zero: it never ran.
+            self.quality.total_samples_expected = self.quality.rtp_packets_received
+        else:
+            # Update expected samples (based on actual payload samples per packet)
+            self.quality.total_samples_expected = (
+                self.quality.rtp_packets_received * self._payload_samples_per_packet
+            )
+            
+            # Update RTP loss stats from resequencer
+            reseq_stats = self.resequencer.get_stats()
+            self.quality.rtp_packets_lost = reseq_stats.get('gaps_detected', 0)
+            self.quality.rtp_packets_resequenced = reseq_stats.get('packets_resequenced', 0)
+            self.quality.rtp_packets_duplicate = reseq_stats.get('packets_duplicate', 0)
         
         # Clear buffers
         self._sample_buffer = []

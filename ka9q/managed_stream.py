@@ -133,6 +133,7 @@ class ManagedStream:
         samples_per_packet: int = 320,
         resequence_buffer_size: int = 64,
         deliver_interval_packets: int = 10,
+        raw_payloads: bool = False,
     ):
         """
         Initialize ManagedStream.
@@ -154,6 +155,10 @@ class ManagedStream:
             max_restore_attempts: Max restore attempts, 0=unlimited (default: 0)
             samples_per_packet: Expected samples per RTP packet
             resequence_buffer_size: Packets to buffer for resequencing
+            raw_payloads: Deliver undecoded RTP payloads (List[bytes], one per
+                packet) instead of samples — required for the framed encodings
+                OPUS/OPUS_VOIP/AX25, which have no raw-sample representation.
+                See :class:`ka9q.stream.RadiodStream` for the full contract.
             deliver_interval_packets: Deliver to callback every N packets
         """
         self._control = control
@@ -179,6 +184,7 @@ class ManagedStream:
         self._samples_per_packet = samples_per_packet
         self._resequence_buffer_size = resequence_buffer_size
         self._deliver_interval_packets = deliver_interval_packets
+        self._raw_payloads = raw_payloads
         
         # State
         self._state = StreamState.STOPPED
@@ -305,6 +311,7 @@ class ManagedStream:
             samples_per_packet=self._samples_per_packet,
             resequence_buffer_size=self._resequence_buffer_size,
             deliver_interval_packets=self._deliver_interval_packets,
+            raw_payloads=self._raw_payloads,
         )
         self._stream.start()
         
