@@ -65,6 +65,32 @@ class Metrics:
 
 
 # SSRC allocation function - compatible with signal-recorder
+# Preset -> demodulator, mirroring the `demod =` line of each preset in
+# ka9q-radio's share/presets.conf.  LINEAR is the default because radio.h
+# defines it as "everything else"; defaulting to FM (as this once did) puts
+# an FM demodulator behind sam/ame/dsb/cwu/cwl/wspr/nam/amsq as well as wfm.
+_FM_PRESETS = frozenset({"fm", "nfm", "pm", "npm"})
+_WFM_PRESETS = frozenset({"wfm"})
+_SPECTRUM_PRESETS = frozenset({"spectrum"})
+
+
+def demod_type_for_preset(preset: str) -> int:
+    """Return the DEMOD_TYPE that matches a radiod preset name.
+
+    radiod sets the demodulator from the preset, but clients that also send
+    DEMOD_TYPE override it -- so the value has to agree with the preset or
+    the channel runs a demodulator the caller never asked for.
+    """
+    name = (preset or "").strip().lower()
+    if name in _WFM_PRESETS:
+        return DemodType.WFM_DEMOD
+    if name in _FM_PRESETS:
+        return DemodType.FM_DEMOD
+    if name in _SPECTRUM_PRESETS:
+        return DemodType.SPECT_DEMOD
+    return DemodType.LINEAR_DEMOD
+
+
 def allocate_ssrc(
     frequency_hz: float,
     preset: str = "iq",
@@ -1498,8 +1524,13 @@ class RadiodControl:
         encode_string(cmdbuffer, StatusType.PRESET, preset)
         logger.info(f"Setting preset for SSRC {ssrc} to {preset}")
         
-        # DEMOD_TYPE: 0=linear (IQ/USB/LSB/etc), 1=FM
-        demod_type = 0 if preset.lower() in ['iq', 'usb', 'lsb', 'cw', 'am'] else 1
+        # DEMOD_TYPE must agree with what the preset just selected, because
+        # radiod applies whichever arrives last and this one follows PRESET
+        # in the same packet.  Getting it wrong silently substitutes a
+        # different demodulator: asking for "wfm" and sending FM_DEMOD gets
+        # the narrowband FM demod running behind a +/-110 kHz filter, which
+        # produces no output at all and reports snr=-inf forever.
+        demod_type = demod_type_for_preset(preset)
         encode_int(cmdbuffer, StatusType.DEMOD_TYPE, demod_type)
         logger.info(f"Setting DEMOD_TYPE for SSRC {ssrc} to {demod_type}")
         

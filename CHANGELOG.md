@@ -1,5 +1,35 @@
 # Changelog
 
+## 3.25.1 (2026-08-18)
+
+### Fixed
+
+- **`DEMOD_TYPE` no longer contradicts the preset it is sent with.**
+  `create_channel()` derived the demodulator from a five-name allowlist —
+  `demod_type = 0 if preset in ['iq','usb','lsb','cw','am'] else 1` — and sent
+  it immediately after `PRESET` in the same packet, so the later value won.
+  Every preset outside that list got `FM_DEMOD`, including `wfm`: radiod ran
+  the *narrowband* FM demodulator behind the wfm preset's ±110 kHz filter,
+  which emits nothing and reports `snr=-inf` indefinitely. Broadcast FM was
+  unusable through this library and the failure was silent — the channel
+  existed, verified, and simply never produced RTP.
+
+  `sam`, `ame`, `dsb`, `cwu`, `cwl`, `wspr`, `nam` and `amsq` were mislabelled
+  the same way (all are `demod = linear` in `presets.conf`), and `spectrum`
+  got FM rather than `SPECT_DEMOD`. Only the five allowlisted names were right.
+
+  `demod_type_for_preset()` now mirrors the `demod =` line of each stock
+  preset, and defaults to `LINEAR_DEMOD` — which `radio.h` defines as
+  "everything else" — rather than to FM.
+
+  Verified against radiod: a `wfm` channel now reports `demod_type=2` and,
+  with a squelch threshold below the signal, streams continuously (301
+  packets in 6 s where it previously produced none).
+
+  Note for callers: radiod's `wfm.c` sets `chan->squelch.snr_enable = true`
+  unconditionally when the demod thread starts, so `set_squelch(enable=False)`
+  is reverted on a wfm channel. Hold it open with a low `open_snr_db` instead.
+
 ## 3.25.0 (2026-08-18)
 
 ### Added
