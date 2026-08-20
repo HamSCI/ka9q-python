@@ -1348,6 +1348,50 @@ class RadiodControl:
             radiod_host=self.status_address,
         )
 
+    def _free_ssrc(self, base: int, tries: int = 8) -> int:
+        """An SSRC radiod is not currently tearing down.
+
+        `allocate_ssrc` is deterministic in the parameters that define a
+        channel, which is what lets two clients agree on an SSRC without
+        talking to each other. It has one sharp edge: removing a channel
+        starts an asynchronous purge of roughly 20 seconds (radio.c reaps a
+        channel only once its frequency reaches zero, after
+        Channel_idle_timeout), and re-creating the same SSRC inside that
+        window hands back the channel being reaped. It answers status, its
+        frequency reads zero, and it never emits RTP -- a silent failure with
+        no error anywhere.
+
+        Measured against radiod on an Airspy HF+, one wfm channel on
+        91.300 MHz removed and immediately re-created:
+
+            +0 s   0 frames      +2 s   0 frames
+            +10 s  0 frames      +25 s  201 frames, snr 19.07
+
+        A caller that re-selects a station it left seconds ago hits this every
+        time. Rather than make every caller wait out the purge, probe the
+        deterministic SSRC and step to a nearby one if it is mid-teardown.
+        The common case is unchanged: a free SSRC is returned as-is, so
+        independent clients still agree.
+        """
+        candidate = base
+        for _ in range(tries):
+            try:
+                info = self.poll_channel(candidate, timeout=0.5)
+            except Exception:
+                return candidate          # cannot tell; assume it is usable
+            if info is None:
+                return candidate          # radiod does not have it: free
+            if (getattr(info, 'frequency', None) or 0) != 0:
+                return candidate          # live channel; caller reconfigures it
+            # frequency == 0: being reaped. Step to another SSRC.
+            candidate = (candidate + 0x10001) & 0xFFFFFFFF
+            if candidate == 0:
+                candidate = 1
+        logger.warning(
+            f"No free SSRC near {base} after {tries} tries; using {candidate}"
+        )
+        return candidate
+
     def create_channel(self, frequency_hz: float,
                        preset: str = "iq", sample_rate: Optional[int] = None,
                        agc_enable: int = 0, gain: float = 0.0,
@@ -1486,7 +1530,7 @@ class RadiodControl:
 
         # Auto-allocate SSRC if not provided
         if ssrc is None:
-            ssrc = allocate_ssrc(
+            base = allocate_ssrc(
                 frequency_hz=frequency_hz,
                 preset=preset,
                 sample_rate=sample_rate or 16000,  # Default for allocation
@@ -1496,7 +1540,14 @@ class RadiodControl:
                 encoding=encoding,
                 radiod_host=self.status_address
             )
-            logger.info(f"Auto-allocated SSRC: {ssrc}")
+            ssrc = self._free_ssrc(base)
+            if ssrc == base:
+                logger.info(f"Auto-allocated SSRC: {ssrc}")
+            else:
+                logger.info(
+                    f"Auto-allocated SSRC: {ssrc} "
+                    f"(deterministic {base} is still being reaped)"
+                )
         
         # Validate inputs
         _validate_ssrc(ssrc)
