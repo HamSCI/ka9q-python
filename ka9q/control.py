@@ -1360,8 +1360,13 @@ class RadiodControl:
     # +10 s; 201 frames and snr 19.07 at +25 s.
     PURGE_SECONDS = 25.0
 
-    def _free_ssrc(self, base: int, tries: int = 8) -> int:
+    def _free_ssrc(self, base: int, tries: int = 8,
+                   force_new: bool = False) -> int:
         """An SSRC radiod is not currently tearing down.
+
+        With `force_new`, also step past any SSRC radiod currently HAS, so a
+        caller whose channel does not work can get a different one without
+        having to reason about SSRCs itself.
 
         `allocate_ssrc` is deterministic in the parameters that define a
         channel, which is what lets two clients agree on an SSRC without
@@ -1385,6 +1390,21 @@ class RadiodControl:
 
         candidate = base
         for _ in range(tries):
+            if force_new:
+                # The caller has a channel on this SSRC that does not work and
+                # wants a different one. Reusing the deterministic value would
+                # hand back the same channel, so step past anything radiod
+                # already has under it.
+                try:
+                    info = self.poll_channel(candidate, timeout=0.5)
+                except Exception:
+                    info = None
+                if info is None:
+                    return candidate
+                candidate = (candidate + 0x10001) & 0xFFFFFFFF
+                if candidate == 0:
+                    candidate = 1
+                continue
             when = self._removed_at.get(candidate)
             if when is None or now - when > self.PURGE_SECONDS:
                 return candidate
@@ -1413,7 +1433,8 @@ class RadiodControl:
                        lifetime: Optional[int] = None,
                        low_edge: Optional[float] = None,
                        high_edge: Optional[float] = None,
-                       kaiser_beta: Optional[float] = None) -> int:
+                       kaiser_beta: Optional[float] = None,
+                       force_new: bool = False) -> int:
         """
         Create a new channel with specified configuration
         
@@ -1552,7 +1573,7 @@ class RadiodControl:
                 encoding=encoding,
                 radiod_host=self.status_address
             )
-            ssrc = self._free_ssrc(base)
+            ssrc = self._free_ssrc(base, force_new=force_new)
             if ssrc == base:
                 logger.info(f"Auto-allocated SSRC: {ssrc}")
             else:
