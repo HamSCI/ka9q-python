@@ -1392,15 +1392,20 @@ class RadiodControl:
         for _ in range(tries):
             if force_new:
                 # The caller has a channel on this SSRC that does not work and
-                # wants a different one. Reusing the deterministic value would
-                # hand back the same channel, so step past anything radiod
-                # already has under it.
-                try:
-                    info = self.poll_channel(candidate, timeout=0.5)
-                except Exception:
-                    info = None
-                if info is None:
-                    return candidate
+                # wants a different one. Step past anything radiod already has
+                # under it -- AND anything we removed recently, because a
+                # channel stops answering status before it is fully reaped.
+                # Trusting the poll alone returned an SSRC radiod was still
+                # purging: it looked free, took the create, and produced no
+                # RTP, costing the caller a whole failed attempt.
+                when = self._removed_at.get(candidate)
+                if when is None or now - when > self.PURGE_SECONDS:
+                    try:
+                        info = self.poll_channel(candidate, timeout=0.5)
+                    except Exception:
+                        info = None
+                    if info is None:
+                        return candidate
                 candidate = (candidate + 0x10001) & 0xFFFFFFFF
                 if candidate == 0:
                     candidate = 1
