@@ -934,6 +934,12 @@ class RadiodControl:
                       (audit finding F5).
         """
         self.status_address = status_address
+        # SSRC -> monotonic time it was removed. radiod reaps a channel only
+        # once its frequency reaches zero, after Channel_idle_timeout, so an
+        # SSRC removed moments ago cannot be re-created yet. Remembering our
+        # own removals means the common case -- an SSRC nobody has touched --
+        # costs no round trip at all.
+        self._removed_at: Dict[int, float] = {}
         self.interface = interface
         self.client_id = client_id
         self.socket = None
@@ -1348,42 +1354,48 @@ class RadiodControl:
             radiod_host=self.status_address,
         )
 
+    # radiod reaps a removed channel once its frequency reads zero, after
+    # Channel_idle_timeout. Measured on an Airspy HF+, one wfm channel on
+    # 91.300 MHz removed and immediately re-created: 0 frames at +0 s, +2 s and
+    # +10 s; 201 frames and snr 19.07 at +25 s.
+    PURGE_SECONDS = 25.0
+
     def _free_ssrc(self, base: int, tries: int = 8) -> int:
         """An SSRC radiod is not currently tearing down.
 
         `allocate_ssrc` is deterministic in the parameters that define a
         channel, which is what lets two clients agree on an SSRC without
-        talking to each other. It has one sharp edge: removing a channel
-        starts an asynchronous purge of roughly 20 seconds (radio.c reaps a
-        channel only once its frequency reaches zero, after
-        Channel_idle_timeout), and re-creating the same SSRC inside that
-        window hands back the channel being reaped. It answers status, its
-        frequency reads zero, and it never emits RTP -- a silent failure with
-        no error anywhere.
+        talking to each other. Its sharp edge: re-creating an SSRC inside the
+        purge window hands back the channel being reaped -- it answers status,
+        its frequency reads zero, and it never emits RTP. A silent failure
+        with no error anywhere, and one that any client re-selecting a station
+        it left seconds ago hits every time.
 
-        Measured against radiod on an Airspy HF+, one wfm channel on
-        91.300 MHz removed and immediately re-created:
-
-            +0 s   0 frames      +2 s   0 frames
-            +10 s  0 frames      +25 s  201 frames, snr 19.07
-
-        A caller that re-selects a station it left seconds ago hits this every
-        time. Rather than make every caller wait out the purge, probe the
-        deterministic SSRC and step to a nearby one if it is mid-teardown.
-        The common case is unchanged: a free SSRC is returned as-is, so
-        independent clients still agree.
+        The check is free unless we removed this SSRC ourselves recently.
+        Probing every allocation cost half a second per channel created (a
+        poll for a channel that does not exist can only end at its timeout),
+        which is real latency on the very first tune of a session, where
+        nothing has been removed at all.
         """
+        now = time.monotonic()
+        # Forget removals that have certainly completed.
+        for ssrc, when in list(self._removed_at.items()):
+            if now - when > self.PURGE_SECONDS:
+                del self._removed_at[ssrc]
+
         candidate = base
         for _ in range(tries):
+            when = self._removed_at.get(candidate)
+            if when is None or now - when > self.PURGE_SECONDS:
+                return candidate
+            # We removed this one recently. Confirm it really is still being
+            # reaped before stepping away from the deterministic value.
             try:
                 info = self.poll_channel(candidate, timeout=0.5)
             except Exception:
-                return candidate          # cannot tell; assume it is usable
-            if info is None:
-                return candidate          # radiod does not have it: free
-            if (getattr(info, 'frequency', None) or 0) != 0:
-                return candidate          # live channel; caller reconfigures it
-            # frequency == 0: being reaped. Step to another SSRC.
+                info = None
+            if info is None or (getattr(info, 'frequency', None) or 0) != 0:
+                return candidate
             candidate = (candidate + 0x10001) & 0xFFFFFFFF
             if candidate == 0:
                 candidate = 1
@@ -2140,6 +2152,7 @@ class RadiodControl:
             - The channel may still appear in discovery for a brief time after calling this
         """
         _validate_ssrc(ssrc)
+        self._removed_at[ssrc] = time.monotonic()
         
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
