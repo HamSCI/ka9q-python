@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.25.2 (2026-08-22)
 
 ### Fixed
 
