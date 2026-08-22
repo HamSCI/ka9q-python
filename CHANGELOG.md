@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`poll_channel()` can now see a channel radiod holds at 0 Hz** (#6).
+  radiod answers a poll for a channel it is still reaping after
+  `remove_channel()` — or one parked at 0 Hz, or one a dynamic-create build
+  minted for the poll itself — with the same `frequency = 0` reply it gives
+  for an unknown SSRC. `poll_channel()` discarded those as "no such
+  channel", so a purging SSRC was indistinguishable from a free one and any
+  "is this SSRC free?" logic re-created the dying channel (answers status,
+  never emits RTP). New `allow_idle=True` returns that reply as a
+  `ChannelInfo` with `frequency == 0.0`, meaning "radiod currently answers
+  for this SSRC at 0 Hz — not free to reuse". Default behaviour is
+  unchanged; `expected_freq` still rejects 0 Hz. `remove_channel()`'s
+  docstring now states the purge window.
+
 ## 3.25.1 (2026-08-18)
 
 ### Fixed

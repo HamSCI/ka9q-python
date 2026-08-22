@@ -1683,7 +1683,8 @@ class RadiodControl:
         return True
 
     def poll_channel(self, ssrc: int, expected_freq: Optional[float] = None,
-                     timeout: float = 2.0, frequency_tolerance: float = 1.0):
+                     timeout: float = 2.0, frequency_tolerance: float = 1.0,
+                     allow_idle: bool = False):
         """Targeted status poll for a single channel — O(1), not O(channels).
 
         Sends a poll naming exactly this ``ssrc`` and returns the ChannelInfo
@@ -1699,6 +1700,23 @@ class RadiodControl:
         or stale replies are skipped and the poll is re-sent until the real
         status appears or the timeout elapses.  With no ``expected_freq`` an
         obviously-empty reply (frequency 0) is rejected.
+
+        **The 0 Hz blind spot (issue #6).**  That empty reply is byte-for-byte
+        what radiod also sends for a channel it *holds* at 0 Hz: one being
+        reaped after :meth:`remove_channel` (radiod tunes it to 0 Hz and lets
+        its lifetime run out), one parked at 0 Hz, or -- on builds that create
+        channels dynamically -- one this very poll just minted.  So with the
+        default ``allow_idle=False`` a purging SSRC is indistinguishable from a
+        free one: both return ``None``.  Re-creating such an SSRC hands back
+        the dying channel, which answers status and never emits RTP.
+
+        Pass ``allow_idle=True`` to receive that reply instead: the returned
+        ``ChannelInfo`` has ``frequency == 0.0`` and proves that radiod
+        currently answers for this SSRC at 0 Hz -- i.e. the SSRC is **not**
+        free to reuse right now.  It does *not* tell you why (reaping vs
+        parked vs freshly minted), and ``None`` then means only "no reply".
+        ``expected_freq`` always wins: a 0 Hz reply never matches a non-zero
+        expectation, whatever ``allow_idle`` says.
 
         This is the establishment/verify probe: after ``create_channel`` sends
         the create, one ``poll_channel(ssrc, expected_freq=f)`` confirms radiod
@@ -1762,8 +1780,9 @@ class RadiodControl:
                 if expected_freq is not None:
                     if abs(freq - expected_freq) > frequency_tolerance:
                         continue   # empty or stale reply — keep waiting
-                elif not freq:
+                elif not freq and not allow_idle:
                     continue       # radiod's "no such channel" empty status
+                                   # -- or a channel held at 0 Hz; see #6
                 dest = status.get("destination", {})
                 mcast = dest.get("address", "") if isinstance(dest, dict) else ""
                 port = dest.get("port", 0) if isinstance(dest, dict) else 0
@@ -2087,6 +2106,13 @@ class RadiodControl:
             - Always call this when your application is done with a channel
             - Especially important for long-running applications that create temporary channels
             - The channel may still appear in discovery for a brief time after calling this
+            - Removal is asynchronous: radiod tunes the channel to 0 Hz and only
+              reaps it when its lifetime runs out (build/config dependent; ~20 s
+              observed).  Until then a poll for this SSRC gets a 0 Hz reply that
+              :meth:`poll_channel` drops by default, so the SSRC *looks* free
+              while re-creating it would hand back the dying channel.  Use
+              ``poll_channel(ssrc, allow_idle=True)`` to see that state
+              (issue #6).
         """
         _validate_ssrc(ssrc)
         
