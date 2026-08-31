@@ -10,6 +10,7 @@ import time
 import socket
 import struct
 import numpy as np
+import pytest
 import logging
 from collections import Counter
 from typing import Dict, Any
@@ -123,7 +124,28 @@ def capture_packets(
 
 
 def test_iq_20khz_f32(radiod_address: str):
-    """Test IQ 20kHz F32 with resequencer."""
+    """Test IQ 20kHz F32 with resequencer.
+
+    An integration test: it needs a live radiod.  It carried no guard, so
+    on any machine without one it FAILED rather than skipped -- and its
+    fallback default was another station's address entirely
+    (bee1-status.local), which does not resolve from a devbox.  A failing
+    test that only means "no radiod here" trains people to ignore a red
+    suite.
+
+    Now it follows the convention test_integration.py already set:
+    SKIP_INTEGRATION disables it outright, and an unreachable radiod
+    skips with the address in the reason rather than failing.
+    """
+    import os as _os
+    if _os.environ.get("SKIP_INTEGRATION"):
+        pytest.skip("Integration tests disabled (SKIP_INTEGRATION set)")
+    try:
+        RadiodControl(radiod_address).close()
+    except Exception as exc:  # noqa: BLE001 — any failure to reach it is a skip
+        pytest.skip(f"Cannot connect to radiod at {radiod_address}: "
+                    f"{exc.__class__.__name__}: {exc}")
+
     print("\n" + "="*60)
     print("IQ 20kHz F32 Resequencer Test")
     print("="*60)
