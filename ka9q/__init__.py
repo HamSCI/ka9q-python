@@ -119,7 +119,11 @@ from .slot_clock import SlotClock, Slot, SlotClockDesyncError, rtp_diff
 from .spectrum_stream import SpectrumStream
 from .status_listener import StatusListener, StatusListenerStats
 
+from .recovery_ladder import RecoveryAction, RecoveryLadder  # noqa: E402
+
 __all__ = [
+    "RecoveryAction",
+    "RecoveryLadder",
     # Control
     'RadiodControl',
     'allocate_ssrc',
