@@ -93,3 +93,74 @@ class TestObservability:
             lad.observe(healthy=False)
         assert lad.reprovisions == 2
         assert lad.full_resets == 2
+
+class TestRestartSelfRung:
+    """The rung that repair cannot express: replace me.
+
+    ⛔ AC0G-ND, 2026-09-03.  wspr-recorder's dt-guard caught a slot anchor
+    eight minutes off true UTC and performed its deepest in-process repair —
+    reset all 17 band recorders, re-seed each from fresh channel_info.  The
+    fault returned two cycles later.  Repair, fault, repair, fault, and it
+    would have run all night, because the guard counts strikes toward FIRING
+    and never counts fires: nothing concluded that repairing was not working.
+
+    Every liveness check stayed green throughout.  The recorder ingested RTP,
+    completed 120 s slots at "100% complete", wrote WAVs and ran decoders —
+    working and WRONG, which WatchdogSec cannot see by construction.  One
+    human restart fixed it, because a poisoned anchor lives in process memory.
+    """
+
+    def test_restart_is_opt_in(self):
+        # ⛔ An action a caller cannot handle falls through its if/elif and
+        # does nothing at all — silent inaction, the failure this ladder
+        # exists to prevent.  An existing caller must never receive it.
+        ladder = RecoveryLadder()
+        assert ladder.restart_after is None
+        actions = [ladder.observe(healthy=False) for _ in range(12)]
+        assert RecoveryAction.RESTART_SELF not in actions
+        assert actions[-1] is RecoveryAction.FULL_RESET
+
+    def test_it_escalates_once_repair_has_demonstrably_failed(self):
+        ladder = RecoveryLadder(reprovision_after=1, full_reset_after=2,
+                                restart_after=3)
+        assert ladder.observe(healthy=False) is RecoveryAction.REPROVISION
+        assert ladder.observe(healthy=False) is RecoveryAction.FULL_RESET
+        assert ladder.observe(healthy=False) is RecoveryAction.RESTART_SELF
+        assert ladder.restarts_requested == 1
+
+    def test_it_keeps_asking_rather_than_going_quiet(self):
+        ladder = RecoveryLadder(full_reset_after=2, restart_after=3)
+        for _ in range(3):
+            last = ladder.observe(healthy=False)
+        assert last is RecoveryAction.RESTART_SELF
+        assert ladder.observe(healthy=False) is RecoveryAction.RESTART_SELF
+        assert ladder.restarts_requested == 2
+
+    def test_one_good_cycle_forecloses_the_restart(self):
+        # ⛔ The safety property that matters.  A recorder that recovers on
+        # its own must not be killed by a stale count: restarting a working
+        # station is worse than the fault it was reacting to.
+        ladder = RecoveryLadder(full_reset_after=2, restart_after=3)
+        ladder.observe(healthy=False)
+        ladder.observe(healthy=False)
+        assert ladder.observe(healthy=True) is RecoveryAction.NONE
+        assert ladder.consecutive_degraded == 0
+        assert ladder.observe(healthy=False) is RecoveryAction.REPROVISION
+
+    def test_restart_cannot_be_configured_before_full_reset(self):
+        # Replacing the process is the LAST resort; a ladder that reaches for
+        # it before trying repair is not a ladder.
+        with pytest.raises(ValueError):
+            RecoveryLadder(reprovision_after=1, full_reset_after=3,
+                           restart_after=2)
+
+    def test_the_wspr_shape_self_repairs_in_two_cycles_of_futility(self):
+        # WSPR's dt-guard fires every 2 cycles of 120 s. Reaching the restart
+        # in three observations is ~4 minutes of self-repair instead of never.
+        ladder = RecoveryLadder(reprovision_after=1, full_reset_after=2,
+                                restart_after=3)
+        assert [ladder.observe(healthy=False) for _ in range(3)] == [
+            RecoveryAction.REPROVISION,
+            RecoveryAction.FULL_RESET,
+            RecoveryAction.RESTART_SELF,
+        ]

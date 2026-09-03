@@ -33,6 +33,11 @@ Typical use, from whatever loop the client already runs::
         rm.reprovision_stale()
     elif action is RecoveryAction.FULL_RESET:
         rm.full_reset()
+    elif action is RecoveryAction.RESTART_SELF:
+        log.critical("in-process repair exhausted after %d attempts; "
+                     "exiting for systemd to replace us",
+                     ladder.consecutive_degraded)
+        raise SystemExit(1)          # Restart=always does the rest
 
 One ladder per source.  A client with two radiods keeps two, so a fault
 on one never escalates the other.
@@ -50,6 +55,13 @@ class RecoveryAction(enum.Enum):
     NONE = "none"
     REPROVISION = "reprovision"
     FULL_RESET = "full_reset"
+    #: In-process remedies are exhausted; the PROCESS must be replaced.
+    #:
+    #: ⛔ OPT-IN (`restart_after=None` by default).  An action a caller does
+    #: not handle falls through its if/elif chain and does NOTHING, which is
+    #: silent inaction — the exact failure this ladder exists to prevent.  So
+    #: a caller asks for this rung only once it can act on it.
+    RESTART_SELF = "restart_self"
 
 
 class RecoveryLadder:
@@ -67,6 +79,7 @@ class RecoveryLadder:
         self,
         reprovision_after: int = DEFAULT_REPROVISION_AFTER,
         full_reset_after: int = DEFAULT_FULL_RESET_AFTER,
+        restart_after: int | None = None,
     ) -> None:
         if full_reset_after < reprovision_after:
             raise ValueError(
@@ -74,13 +87,22 @@ class RecoveryLadder:
                 f"reprovision_after ({reprovision_after}): a ladder whose "
                 f"top rung comes first is not a ladder"
             )
+        if restart_after is not None and restart_after < full_reset_after:
+            raise ValueError(
+                f"restart_after ({restart_after}) must not precede "
+                f"full_reset_after ({full_reset_after}): replacing the "
+                f"process is the LAST resort, not an earlier one"
+            )
         self.reprovision_after = int(reprovision_after)
         self.full_reset_after = int(full_reset_after)
+        self.restart_after = (None if restart_after is None
+                              else int(restart_after))
         self.consecutive_degraded = 0
         #: Totals since construction, so an operator can tell a station
         #: that is quietly self-healing from one that is merely quiet.
         self.reprovisions = 0
         self.full_resets = 0
+        self.restarts_requested = 0
 
     @property
     def escalating(self) -> bool:
@@ -95,6 +117,12 @@ class RecoveryLadder:
 
         self.consecutive_degraded += 1
         n = self.consecutive_degraded
+        if self.restart_after is not None and n >= self.restart_after:
+            # Checked before FULL_RESET because it is the higher rung: once
+            # in-process repair has demonstrably failed this many times,
+            # repeating it is the behaviour we are fixing.
+            self.restarts_requested += 1
+            return RecoveryAction.RESTART_SELF
         if n >= self.full_reset_after:
             # Stays here rather than giving up.  A client that cannot
             # recover must keep trying: going quiet is the exact failure
