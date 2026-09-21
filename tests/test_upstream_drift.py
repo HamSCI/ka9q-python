@@ -315,3 +315,108 @@ static unsigned long encode_radio_status(struct frontend const *frontend,chan_t 
         got = parse_read_surface(real.read_text())
         assert len(got) > 50, f"only parsed {len(got)} TLVs from the real file"
         assert "PRESET" in got
+
+
+# ---------------------------------------------------------------------------
+# An enum that MOVES, and one we cannot read
+# ---------------------------------------------------------------------------
+#
+# 2026-09-21: `enum demod_type` moved from src/radio.h to src/status.h
+# upstream, values byte-identical.  The checker looked only where the map
+# said, found nothing, and reported "could not parse enum demod_type" as a
+# WARN -- the same severity as a cosmetic change to a field nobody reads.
+#
+# DemodType is in STREAM_CRITICAL_ENUMS.  "I could not check a stream-critical
+# enum" is not the same statement as "a non-critical field changed", and
+# collapsing them is how an unverified contract change ships.  On this
+# occasion the values were unchanged and nothing broke; that was luck, not the
+# check working.
+
+from check_upstream_drift import (  # noqa: E402
+    ENUM_SEARCH_PATHS,
+    _classify_parse_failure,
+    find_enum_text,
+)
+
+
+class TestEnumRelocation:
+    """Look for an enum where it IS, not only where it used to be."""
+
+    _RADIO_H = "enum demod_type {\n  LINEAR_DEMOD = 0,\n  FM_DEMOD,\n};\n"
+    _STATUS_H = "enum status_type {\n  EOL = 0,\n};\n"
+
+    def test_found_in_its_original_home(self):
+        srcs = {"src/radio.h": self._RADIO_H, "src/status.h": self._STATUS_H}
+        path, text = find_enum_text("demod_type", srcs)
+        assert path == "src/radio.h" and "LINEAR_DEMOD" in text
+
+    def test_found_after_it_moves(self):
+        """The 2026-09-21 relocation: radio.h keeps everything but the enum."""
+        srcs = {"src/radio.h": "struct channel { int x; };\n",
+                "src/status.h": self._STATUS_H + self._RADIO_H}
+        path, text = find_enum_text("demod_type", srcs)
+        assert path == "src/status.h" and "LINEAR_DEMOD" in text
+
+    def test_absent_everywhere_is_reported_as_absent(self):
+        path, text = find_enum_text("demod_type", {"src/radio.h": "int x;"})
+        assert path is None and text is None
+
+    def test_the_search_covers_every_watched_header(self):
+        """A new header must not silently fall outside the search."""
+        assert set(ENUM_SEARCH_PATHS) >= {"src/status.h", "src/radio.h",
+                                          "src/rtp.h", "src/window.h"}
+
+
+class TestUnparseableStreamCriticalEnumFails:
+
+    def test_a_stream_critical_enum_we_cannot_read_is_a_fail(self):
+        sev, reason = _classify_parse_failure("DemodType")
+        assert sev == "fail", reason
+        assert "verif" in reason.lower() or "check" in reason.lower()
+
+    def test_a_non_critical_enum_we_cannot_read_only_warns(self):
+        sev, _ = _classify_parse_failure("WindowType")
+        assert sev == "warn"
+
+    def test_status_type_counts_as_stream_critical_here(self):
+        """StatusType is not in STREAM_CRITICAL_ENUMS -- its criticality is
+        per-field -- but failing to parse the TLV vocabulary ENTIRELY means
+        no field can be checked at all."""
+        sev, _ = _classify_parse_failure("StatusType")
+        assert sev == "fail"
+
+
+class TestSearchMatchesDeclarationsNotUsages:
+    """A mention is not a declaration.
+
+    The first version of find_enum_text matched `enum <name> ` anywhere, so a
+    USAGE — `enum encoding e = parse_encoding(str);` — counted as the
+    declaration.  Searching status.h first, it "found" Encoding there, handed
+    parse_c_enum a header with no such enum, and the parse failure was then
+    classified FAIL on a stream-critical enum.  A false alarm that blocks the
+    pin is not a safe direction to fail in: it trains the next reader to
+    override the check.
+    """
+
+    _DECL = "enum encoding {\n  NO_ENCODING = 0,\n  S16LE,\n};\n"
+    _USAGE = "struct x { enum encoding e; };\nenum encoding f(char *s);\n"
+
+    def test_a_usage_alone_is_not_found(self):
+        path, text = find_enum_text("encoding", {"src/status.h": self._USAGE})
+        assert path is None, f"matched a usage in {path}"
+
+    def test_the_declaration_wins_over_an_earlier_usage(self):
+        """status.h is searched before rtp.h; the declaration must still win."""
+        srcs = {"src/status.h": self._USAGE, "src/rtp.h": self._DECL}
+        path, text = find_enum_text("encoding", srcs)
+        assert path == "src/rtp.h" and "NO_ENCODING" in text
+
+    def test_brace_on_the_next_line_still_counts(self):
+        srcs = {"src/rtp.h": "enum encoding\n{\n  NO_ENCODING = 0,\n};\n"}
+        path, _ = find_enum_text("encoding", srcs)
+        assert path == "src/rtp.h"
+
+    def test_a_typedef_style_declaration_is_found(self):
+        srcs = {"src/rtp.h": "typedef enum encoding {\n  NO_ENCODING = 0,\n} enc_t;\n"}
+        path, _ = find_enum_text("encoding", srcs)
+        assert path == "src/rtp.h"

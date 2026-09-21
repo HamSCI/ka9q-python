@@ -93,6 +93,54 @@ STREAM_CRITICAL_ENUMS: frozenset = frozenset({"Encoding", "DemodType"})
 #: ka9q-python reads the echoed PRESET to choose IQ-versus-real parsing, so a
 #: silent PRESET turns every IQ stream into garbage audio with no error
 #: anywhere.  Watch the emits, not only the enum.
+#: Every header the enums might live in.  An enum is looked up by NAME
+#: across all of them rather than at one fixed path, because upstream moves
+#: them: on 2026-09-21 `enum demod_type` went from src/radio.h to
+#: src/status.h with byte-identical values, and a path-keyed lookup simply
+#: reported "could not parse" -- a warn, on a STREAM-CRITICAL enum, which
+#: would have read the same had the values changed too.
+ENUM_SEARCH_PATHS = ("src/status.h", "src/radio.h", "src/rtp.h",
+                     "src/window.h")
+
+
+def find_enum_text(enum_name: str, sources: dict):
+    """Locate an enum by name across the watched headers.
+
+    Returns (path, text) for the first header whose text declares it, or
+    (None, None).  Searching by name rather than by path is what survives a
+    relocation; the path is returned so a report can say where it now lives.
+    """
+    # ⛔ Match the DECLARATION, not a mention.  `enum encoding e = ...` is a
+    # usage, and status.h is full of them; matching those made the search
+    # "find" Encoding in the wrong header, hand parse_c_enum a file with no
+    # such enum, and report a stream-critical FAIL on an enum that had not
+    # changed at all.  A false alarm that blocks the pin is not a safe
+    # direction to fail in -- it teaches the next reader to override the check.
+    decl = re.compile(rf"\benum\s+{re.escape(enum_name)}\s*\{{")
+    for path in ENUM_SEARCH_PATHS:
+        text = sources.get(path)
+        if text and decl.search(text):
+            return path, text
+    return None, None
+
+
+def _classify_parse_failure(py_class: str) -> tuple:
+    """Severity for "the enum changed but we could not read it".
+
+    ⛔ Not the same as a cosmetic change.  For an enum whose every value is
+    stream-critical -- and for StatusType, whose vocabulary gates every
+    per-field check below -- an unreadable enum means the contract went
+    UNVERIFIED across this advance.  Fail closed: an unchecked
+    stream-critical contract must block the pin, not decorate the report.
+    """
+    if py_class in STREAM_CRITICAL_ENUMS or py_class == "StatusType":
+        return ("fail", f"{py_class} changed but could not be parsed — this "
+                        f"advance is UNVERIFIED for a stream-critical enum; "
+                        f"do not move the pin until it can be read")
+    return ("warn", f"{py_class} changed but could not be parsed — "
+                    f"non-stream-critical")
+
+
 READ_SURFACE_FILE = "src/radio_status.c"
 
 #: The function whose emits define what a status packet carries.  Other
@@ -100,13 +148,17 @@ READ_SURFACE_FILE = "src/radio_status.c"
 #: channel status consumer, so counting them would raise false alarms.
 READ_SURFACE_FUNCTION = "encode_radio_status"
 
-HEADER_FILES = {
-    # path-in-repo  → (enum-name, python-class-name)
-    "src/status.h": ("status_type", "StatusType"),
-    "src/rtp.h":    ("encoding",    "Encoding"),
-    "src/radio.h":  ("demod_type",  "DemodType"),
-    "src/window.h": ("window_type", "WindowType"),
-}
+#: (enum-name-in-C, python-class-name).  Deliberately NOT keyed by path:
+#: upstream relocates enums -- demod_type moved from src/radio.h to
+#: src/status.h on 2026-09-21 -- and a path-keyed map turns that into a
+#: silent "could not parse" on an enum nobody then checks.  Lookup goes
+#: through find_enum_text, which searches ENUM_SEARCH_PATHS by name.
+WATCHED_ENUMS = (
+    ("status_type", "StatusType"),
+    ("encoding",    "Encoding"),
+    ("demod_type",  "DemodType"),
+    ("window_type", "WindowType"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +471,7 @@ def analyze(
     # direction change through: a TLV keeps its name and value while radiod
     # stops emitting it, every enum compares equal, and this function used to
     # return "contract intact" without opening radio_status.c.
-    header_paths = set(HEADER_FILES.keys()) | {READ_SURFACE_FILE}
+    header_paths = set(ENUM_SEARCH_PATHS) | {READ_SURFACE_FILE}
     any_header_touched = False
 
     for sha, subject in raw_commits:
@@ -441,28 +493,48 @@ def analyze(
                      f"no contract-file changes (contract intact)"),
         )
 
+    # Read every watched header once at each revision, then look each enum up
+    # BY NAME.  A path-keyed lookup breaks silently when upstream relocates an
+    # enum -- which it did on 2026-09-21, moving demod_type from radio.h to
+    # status.h with identical values.
+    pin_srcs = {path: _file_at(radio_repo, pin, path)
+                for path in ENUM_SEARCH_PATHS}
+    head_srcs = {path: _file_at(radio_repo, upstream_sha, path)
+                 for path in ENUM_SEARCH_PATHS}
+
     deltas: list[HeaderDelta] = []
-    for header_path, (enum_name, py_class) in HEADER_FILES.items():
-        pin_text  = _file_at(radio_repo, pin, header_path)
-        head_text = _file_at(radio_repo, upstream_sha, header_path)
-        if pin_text == head_text:
+    for enum_name, py_class in WATCHED_ENUMS:
+        pin_path, pin_text = find_enum_text(enum_name, pin_srcs)
+        head_path, head_text = find_enum_text(enum_name, head_srcs)
+        where = head_path or pin_path or "(not found)"
+        moved = (pin_path and head_path and pin_path != head_path)
+        if pin_text == head_text and not moved:
             continue
         try:
-            pin_entries  = parse_c_enum(pin_text,  enum_name) if pin_text  else []
+            pin_entries = parse_c_enum(pin_text, enum_name) if pin_text else []
             head_entries = parse_c_enum(head_text, enum_name) if head_text else []
         except ValueError as exc:
+            sev, reason = _classify_parse_failure(py_class)
             deltas.append(HeaderDelta(
-                header=header_path, enum=py_class,
-                changes=[FieldChange(
-                    kind="parse_error", name=enum_name,
-                    severity="warn",
-                    reason=f"could not parse enum {enum_name}: {exc}",
-                )],
+                header=where, enum=py_class,
+                changes=[FieldChange(kind="parse_error", name=enum_name,
+                                     severity=sev,
+                                     reason=f"{reason} ({exc})")],
             ))
             continue
         changes = _diff_enum(py_class, pin_entries, head_entries)
+        if moved:
+            # Worth saying out loud even when the values match: the next
+            # reader needs to know the map is stale.
+            changes.append(FieldChange(
+                kind="relocated", name=enum_name, severity="warn",
+                reason=(f"moved {pin_path} -> {head_path}; values are "
+                        f"compared by NAME so this does not break the check, "
+                        f"but say so in WATCHED_ENUMS' comment if it matters"),
+            ))
         if changes:
-            deltas.append(HeaderDelta(header=header_path, enum=py_class, changes=changes))
+            deltas.append(HeaderDelta(header=where, enum=py_class,
+                                      changes=changes))
 
     # What radiod EMITS, compared the same way as what it DEFINES.
     pin_src  = _file_at(radio_repo, pin, READ_SURFACE_FILE)
