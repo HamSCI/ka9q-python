@@ -37,6 +37,30 @@ COMPAT_FILE = PROJECT_ROOT / "ka9q_radio_compat"
 # ---------------------------------------------------------------------------
 # C enum parser
 # ---------------------------------------------------------------------------
+#: Headers an enum may live in.  Upstream MOVES them: `enum demod_type`
+#: went from src/radio.h to src/status.h on 2026-09-21 with byte-identical
+#: values, and every consumer that hardcoded the path broke at once --
+#: check_upstream_drift reported "could not parse" and this script raised.
+ENUM_SEARCH_PATHS = ("src/status.h", "src/radio.h", "src/rtp.h",
+                     "src/window.h")
+
+
+def find_enum_source(enum_name: str, sources: dict):
+    """Locate an enum by NAME across the watched headers.
+
+    Returns (path, text), or (None, None).  Matches a DECLARATION -- `enum
+    <name> {` -- never a mention: `enum encoding e = parse_encoding(str);`
+    is a usage, status.h is full of them, and matching those sends the
+    caller a header that does not declare what it asked for.
+    """
+    decl = re.compile(rf"\benum\s+{re.escape(enum_name)}\s*\{{")
+    for path in ENUM_SEARCH_PATHS:
+        text = sources.get(path)
+        if text and decl.search(text):
+            return path, text
+    return None, None
+
+
 def parse_c_enum(header_text: str, enum_name: str) -> List[Tuple[str, int, str]]:
     """
     Parse a C enum from header text.
@@ -88,9 +112,43 @@ def get_git_commit(repo_path: Path) -> str:
     return result.stdout.strip()
 
 
+# The repository sigmond actually clones, from etc/catalog.toml:
+#     [client.ka9q-radio]  repo = "https://github.com/ka9q/ka9q-radio"
+# The pin has to be reachable from THAT repository, whatever a local
+# checkout happens to call its remotes.
+UPSTREAM_URL_FRAGMENT = "ka9q/ka9q-radio"
+
+
+def find_upstream_remote(repo_path: Path) -> Optional[str]:
+    """Name the remote that points at the repository sigmond clones.
+
+    ⛔ Do not assume "origin".  A working checkout carries several remotes
+    — upstream, the HamSCI fork, a personal fork — and which one wears the
+    name ``origin`` is an accident of how it was cloned.  On 2026-09-21
+    ``origin`` here was the HamSCI fork, so the reachability guard refused
+    a commit that sits on ``ka9q/main``: the right answer for the remote it
+    asked, the wrong remote to ask.  Match on the URL instead.
+
+    Returns None when no remote matches, which callers must treat as
+    "cannot tell" — never as "yes".
+    """
+    try:
+        r = subprocess.run(["git", "-C", str(repo_path), "remote", "-v"],
+                           capture_output=True, text=True, timeout=30)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and UPSTREAM_URL_FRAGMENT in parts[1]:
+            return parts[0]
+    return None
+
+
 def is_reachable_from_remote(repo_path: Path, commit: str,
-                             remote: str = "origin") -> bool:
-    """Is ``commit`` contained in any branch of ``remote``?
+                             remote: Optional[str] = None) -> bool:
+    """Is ``commit`` contained in any branch of the upstream remote?
 
     sigmond's ``_install_radiod_native()`` clones UPSTREAM ka9q-radio and
     checks the compat pin out, so a pin that lives only on a fork is not
@@ -98,9 +156,16 @@ def is_reachable_from_remote(repo_path: Path, commit: str,
     the local checkout sat on a fork-only merge branch killed the golden
     template build four hours later with "unable to read tree".
 
+    ``remote`` defaults to whichever remote points at upstream, found by
+    URL rather than by name (see ``find_upstream_remote``).
+
     Answers False when it cannot tell (no such remote, git error): a
     refusal to answer must never read as "yes".
     """
+    if remote is None:
+        remote = find_upstream_remote(repo_path)
+        if remote is None:
+            return False
     try:
         subprocess.run(["git", "-C", str(repo_path), "fetch", "-q", remote],
                        capture_output=True, text=True, timeout=120)
@@ -363,10 +428,24 @@ def main() -> int:
             return 2
 
     # Parse C headers
-    status_text = status_h.read_text()
-    rtp_text = rtp_h.read_text()
-    radio_text = radio_h.read_text()
-    window_text = window_h.read_text()
+    # Read every candidate header once, then look each enum up by name.
+    _sources = {}
+    for _rel in ENUM_SEARCH_PATHS:
+        _f = radio_path / _rel
+        if _f.exists():
+            _sources[_rel] = _f.read_text()
+
+    def _src(enum_name, fallback_path):
+        _p, _t = find_enum_source(enum_name, _sources)
+        if _t is None:
+            # Preserve the old error surface rather than inventing a new one.
+            return fallback_path.read_text()
+        return _t
+
+    status_text = _src("status_type", status_h)
+    rtp_text = _src("encoding", rtp_h)
+    radio_text = _src("demod_type", radio_h)
+    window_text = _src("window_type", window_h)
 
     c_status = parse_c_enum(status_text, "status_type")
     c_encoding = parse_c_enum(rtp_text, "encoding")
@@ -392,6 +471,23 @@ def main() -> int:
             return 0
 
     # --apply
+    # ⛔ Refuse BEFORE writing anything.  This check used to sit between
+    # the types.py write and the pin write, so a refusal left types.py
+    # claiming validation against a commit the pin did not name — the two
+    # files disagreeing is worse than neither moving (2026-09-21).
+    if not is_reachable_from_remote(radio_path, commit):
+        print(
+            f"REFUSING to pin {commit[:12]}: it is not reachable from the "
+            f"upstream remote.\n"
+            f"  sigmond clones UPSTREAM ka9q-radio and checks this commit "
+            f"out, so a fork-only pin makes the golden image unbuildable "
+            f"(2026-08-15: 'unable to read tree', radiod never built).\n"
+            f"  Push the commit upstream, or check out an upstream commit "
+            f"before running --apply.",
+            file=sys.stderr,
+        )
+        return 1
+
     new_content = generate_types_py(c_status, c_encoding, c_demod, c_window, commit)
 
     # Read current for comparison
@@ -409,18 +505,6 @@ def main() -> int:
         "# Updated by: scripts/sync_types.py --apply\n"
         f"{commit}\n"
     )
-    if not is_reachable_from_remote(radio_path, commit):
-        print(
-            f"REFUSING to pin {commit[:12]}: it is not reachable from the "
-            f"upstream remote.\n"
-            f"  sigmond clones UPSTREAM ka9q-radio and checks this commit "
-            f"out, so a fork-only pin makes the golden image unbuildable "
-            f"(2026-08-15: 'unable to read tree', radiod never built).\n"
-            f"  Push the commit upstream, or check out an upstream commit "
-            f"before running --apply.",
-            file=sys.stderr,
-        )
-        return 1
     COMPAT_FILE.write_text(pin_content)
     print(f"Updated {COMPAT_FILE} → {commit[:12]}")
 
