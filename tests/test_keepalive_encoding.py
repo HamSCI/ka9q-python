@@ -18,6 +18,41 @@ from ka9q.control import RadiodControl, StatusType, _encoding_name
 from ka9q.types import Encoding
 
 
+def _tlvs(packet: bytes) -> dict:
+    """Parse a command packet into {type: value_bytes}.
+
+    ⛔ Do NOT substring-search a packet for a type byte.  Every command
+    carries COMMAND_TAG = secrets.randbits(31), so the payload contains
+    RANDOM bytes -- and `bytes([StatusType.OUTPUT_ENCODING]) not in packet`
+    fails whenever that random tag happens to contain that one byte value.
+    Measured as roughly a couple of percent per assertion, which is exactly
+    often enough to train people to re-run a red suite instead of reading it.
+    The `in` direction is unsound the same way, just quieter: a three-byte
+    needle can appear by chance and pass a test that should have failed.
+
+    First byte is the packet type (1 = command); then type/length/value
+    triples, with the high bit of the length byte introducing a multi-byte
+    length.
+    """
+    out = {}
+    i = 1                                   # skip the command/status byte
+    while i < len(packet):
+        t = packet[i]; i += 1
+        if t == 0:                          # EOL
+            break
+        if i >= len(packet):
+            break
+        ln = packet[i]; i += 1
+        if ln & 0x80:                       # extended length
+            n = ln & 0x7f
+            ln = 0
+            for _ in range(n):
+                ln = (ln << 8) | packet[i]; i += 1
+        out[t] = packet[i:i + ln]
+        i += ln
+    return out
+
+
 def _bare_control() -> RadiodControl:
     c = RadiodControl.__new__(RadiodControl)
     c.status_address = "test.local"
@@ -45,28 +80,28 @@ class TestKeepaliveCarriesEncoding:
         c._requested_encoding[1234] = Encoding.F32LE
         sent = _capture(c)
         c.set_channel_lifetime(1234, 3000)
-        assert bytes([StatusType.OUTPUT_ENCODING, 1, Encoding.F32LE]) in sent[0]
+        assert _tlvs(sent[0]).get(StatusType.OUTPUT_ENCODING) == bytes([Encoding.F32LE])
 
     def test_explicit_encoding_wins_over_remembered(self):
         c = _bare_control()
         c._requested_encoding[1234] = Encoding.F32LE
         sent = _capture(c)
         c.set_channel_lifetime(1234, 3000, encoding=Encoding.S16LE)
-        assert bytes([StatusType.OUTPUT_ENCODING, 1, Encoding.S16LE]) in sent[0]
+        assert _tlvs(sent[0]).get(StatusType.OUTPUT_ENCODING) == bytes([Encoding.S16LE])
 
     def test_no_encoding_tag_when_none_requested(self):
         """Back-compat: a client that never asked for an encoding sends none."""
         c = _bare_control()
         sent = _capture(c)
         c.set_channel_lifetime(1234, 3000)
-        assert bytes([StatusType.OUTPUT_ENCODING]) not in sent[0]
+        assert StatusType.OUTPUT_ENCODING not in _tlvs(sent[0])
 
     def test_explicit_zero_suppresses_the_tag(self):
         c = _bare_control()
         c._requested_encoding[1234] = Encoding.F32LE
         sent = _capture(c)
         c.set_channel_lifetime(1234, 3000, encoding=0)
-        assert bytes([StatusType.OUTPUT_ENCODING]) not in sent[0]
+        assert StatusType.OUTPUT_ENCODING not in _tlvs(sent[0])
 
     def test_lifetime_tag_still_present(self):
         """Re-asserting encoding must not disturb what this call is for."""
@@ -74,7 +109,7 @@ class TestKeepaliveCarriesEncoding:
         c._requested_encoding[1234] = Encoding.F32LE
         sent = _capture(c)
         c.set_channel_lifetime(1234, 3000)
-        assert bytes([StatusType.LIFETIME]) in sent[0]
+        assert StatusType.LIFETIME in _tlvs(sent[0])
 
     def test_set_output_encoding_is_remembered(self):
         c = _bare_control()
