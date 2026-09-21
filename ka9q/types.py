@@ -158,9 +158,9 @@ class Encoding:
     F16 = F16LE
 
 
-# Demodulator types — auto-generated from ka9q-radio/src/radio.h
+# Demodulator types — auto-generated from ka9q-radio (see ENUM_SEARCH_PATHS)
 class DemodType:
-    """Demodulator types — values must match ka9q-radio/src/radio.h enum demod_type"""
+    """Demodulator types — values must match ka9q-radio enum demod_type (status.h since 2026-09-19)"""
 
     INVALID_DEMOD = -1  # used as sentinel
     LINEAR_DEMOD = 0  # Linear demodulation, i.e., everything else: SSB, CW, DSB, CAM, IQ

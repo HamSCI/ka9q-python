@@ -288,11 +288,11 @@ def generate_types_py(
     # Demodulator types
     lines.append("")
     lines.append("")
-    lines.append("# Demodulator types — auto-generated from ka9q-radio/src/radio.h")
+    lines.append("# Demodulator types — auto-generated from ka9q-radio (see ENUM_SEARCH_PATHS)")
     lines.append("class DemodType:")
     lines.append(
         '    """Demodulator types — values must match '
-        'ka9q-radio/src/radio.h enum demod_type"""'
+        'ka9q-radio enum demod_type (status.h since 2026-09-19)"""'
     )
     lines.append("")
 
