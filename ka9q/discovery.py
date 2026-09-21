@@ -93,6 +93,20 @@ class ChannelInfo:
     # conflated.
     filter_drops: Optional[int] = None
 
+    # ⛔ APPENDED, deliberately.  These belong logically beside `preset`, but
+    # inserting them there would shift the position of every field after it
+    # and break any client constructing a ChannelInfo positionally.  The
+    # contract test caught exactly that.  Logical grouping is not worth a
+    # silent argument shift in five downstream repos.
+    #
+    # The parameter vector radiod treats as definitive: demod_type and
+    # output_channels together say whether the payload carries complex or
+    # real samples.  The preset string above is a convenience label that a
+    # later per-parameter tweak can leave stale, and which radiod may stop
+    # echoing entirely.  None when the status packet did not carry them.
+    demod_type: Optional[int] = None
+    output_channels: Optional[int] = None
+
     def __post_init__(self):
         # Seed the atomic-pair snapshot from the constructor args if both
         # were provided.  Lets ``get_anchor`` return the construction-time
@@ -335,7 +349,9 @@ def discover_channels_native(status_address: str, listen_duration: float = 2.0,
                 port=port,
                 gps_time=status.get('gps_time'),
                 rtp_timesnap=status.get('rtp_timesnap'),
-                encoding=status.get('encoding', 0)
+                encoding=status.get('encoding', 0),
+                demod_type=status.get('demod_type'),
+                output_channels=status.get('output_channels'),
             )
             
             # Store or update channel info

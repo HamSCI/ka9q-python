@@ -36,6 +36,8 @@ import numpy as np
 from datetime import datetime, timezone
 from typing import Optional, Callable, List
 
+from .types import DemodType
+
 from ._multicast import join_multicast_all_interfaces
 from .discovery import ChannelInfo
 from .rtp_recorder import RTPHeader, parse_rtp_header, rtp_to_utc
@@ -179,6 +181,46 @@ def _decode_to_float32(payload: bytes, encoding: int, *, is_iq: bool = False) ->
     kind = "IQ" if is_iq else "audio"
     logger.warning(f"Unsupported {kind} encoding {encoding}, falling back to F32LE")
     return np.frombuffer(payload, dtype='<f4').astype(np.float32, copy=False)
+
+
+def _derive_is_iq(demod_type, output_channels, preset) -> bool:
+    """Does this channel's payload carry complex samples?
+
+    Decided from the parameter vector radiod treats as definitive, and only
+    from the preset label when the vector is absent.
+
+    Phil Karn, 2026-09-21: "the individual parameters [are] definitive, with
+    a preset just being a convenient shorthand for loading a specific
+    predefined set of them into the channel."  A preset can be tweaked out of
+    truth -- send PRESET USB, retune the filters to -3000,-50, and you have
+    the lower sideband while the label still reads "usb" -- and from the
+    nopreset branch onward radiod may not echo it at all.  Reading the label
+    then yields 'unknown', flips this flag false, and every complex stream is
+    parsed as audio at half the samples per packet, with nothing raised and
+    nothing logged.
+
+    ⛔ Two output channels does NOT mean complex on its own.  ka9q-radio
+    docs/table.csv: OUTPUT_CHANNELS is "1 or 2 in Linear and WFM, 1 in FM",
+    so a WFM channel with two of them is carrying stereo AUDIO.  Only under
+    the linear demodulator do two channels mean I and Q.
+    """
+    if demod_type is not None:
+        if demod_type in (int(DemodType.SPECT_DEMOD),
+                          int(DemodType.SPECT2_DEMOD)):
+            # Unchanged from the preset-based behaviour.  Whether spectrum
+            # framing truly matches IQ is a separate question; do not answer
+            # it silently while fixing something else.
+            return True
+        if demod_type == int(DemodType.LINEAR_DEMOD):
+            if output_channels is not None:
+                return output_channels == 2
+            # Linear with no channel count: fall through to the label rather
+            # than guess, since linear covers both IQ and every real mode.
+        else:
+            return False   # FM, WFM -- never complex, whatever the count
+
+    label = (preset or "").lower()
+    return label in ('iq', 'spectrum')
 
 
 class OpusDecoder:
@@ -327,10 +369,14 @@ class RadiodStream:
         self._max_reconnect_backoff = 60.0  # Max backoff
         self._consecutive_errors = 0
         
-        # Detect payload format from channel preset
+        # Detect payload format from the channel's PARAMETERS, not its label.
         # IQ mode: complex64 (interleaved float32 I/Q)
         # Audio modes: float32 (mono or stereo)
-        self._is_iq = channel.preset.lower() in ('iq', 'spectrum')
+        self._is_iq = _derive_is_iq(
+            getattr(channel, 'demod_type', None),
+            getattr(channel, 'output_channels', None),
+            getattr(channel, 'preset', None),
+        )
         
         # Payload samples differ from RTP timestamp increment in IQ mode
         # IQ: 160 complex samples per packet, but timestamp advances by 320

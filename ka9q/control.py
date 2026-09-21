@@ -790,6 +790,19 @@ def decode_status_dict(buffer: bytes) -> dict:
             status['rf_agc'] = decode_int(data, optlen)
         elif type_val == StatusType.PRESET:
             status['preset'] = decode_string(data, optlen)
+        # ⛔ The two fields that say how to READ the samples.  status.py has
+        # always decoded them; this decoder -- the one discovery.py builds
+        # ChannelInfo from -- did not, so every consumer holding a
+        # ChannelInfo had to fall back to the preset STRING to decide
+        # complex-versus-real.  Phil Karn, 2026-09-21: "the individual
+        # parameters [are] definitive, with a preset just being a convenient
+        # shorthand"; a preset can be tweaked out of truth (PRESET USB then
+        # filters -3000,-50 yields LSB) and, from the nopreset branch on,
+        # may not arrive at all.
+        elif type_val == StatusType.DEMOD_TYPE:
+            status['demod_type'] = decode_int(data, optlen)
+        elif type_val == StatusType.OUTPUT_CHANNELS:
+            status['output_channels'] = decode_int(data, optlen)
         elif type_val == StatusType.LOW_EDGE:
             status['low_edge'] = decode_float(data, optlen)
         elif type_val == StatusType.HIGH_EDGE:
@@ -2063,8 +2076,14 @@ class RadiodControl:
         # configs); the returned ChannelInfo carries the granted value, which
         # consumers use authoritatively.  A rate/preset divergence is logged
         # but not fatal — the channel exists at the requested frequency.
-        if (channel.sample_rate != sample_rate
-                or channel.preset.lower() != preset.lower()):
+        # An ABSENT preset is not a divergence.  radiod may decline to echo
+        # PRESET at all (write-only from the nopreset branch on), and a label
+        # nobody sent cannot disagree with the one we asked for.  Warning on
+        # that would fire on every single ensure_channel call and bury the
+        # real rate divergences underneath it.
+        granted_preset = (getattr(channel, 'preset', None) or "").lower()
+        preset_diverged = bool(granted_preset) and granted_preset != preset.lower()
+        if channel.sample_rate != sample_rate or preset_diverged:
             logger.warning(
                 "ensure_channel: SSRC %s granted rate=%s preset=%s "
                 "(requested rate=%s preset=%s)",
