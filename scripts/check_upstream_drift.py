@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -81,6 +82,23 @@ STREAM_CRITICAL_STATUS_TYPES: dict[str, str] = {
 # clients decode samples wrong or request the wrong demod.
 STREAM_CRITICAL_ENUMS: frozenset = frozenset({"Encoding", "DemodType"})
 
+
+#: Where radiod decides what a client actually RECEIVES.
+#:
+#: ⛔ The header enums are the vocabulary, not the contract.  A TLV can keep
+#: its name and its value while radiod stops EMITTING it, and the enum diff
+#: sees nothing -- the change lives here, in the encode_radio_status body.
+#: That is precisely the 2026-09-21 PRESET proposal, and the checker used to
+#: return "no header changes (contract intact)" without opening this file.
+#: ka9q-python reads the echoed PRESET to choose IQ-versus-real parsing, so a
+#: silent PRESET turns every IQ stream into garbage audio with no error
+#: anywhere.  Watch the emits, not only the enum.
+READ_SURFACE_FILE = "src/radio_status.c"
+
+#: The function whose emits define what a status packet carries.  Other
+#: encoders in the same file (e.g. the front-end-only variant) do not reach a
+#: channel status consumer, so counting them would raise false alarms.
+READ_SURFACE_FUNCTION = "encode_radio_status"
 
 HEADER_FILES = {
     # path-in-repo  → (enum-name, python-class-name)
@@ -236,6 +254,83 @@ def _file_at(repo: Path, ref: str, path: str) -> str:
 # Classification
 # ---------------------------------------------------------------------------
 
+def parse_read_surface(text: str) -> set[str]:
+    """TLV names that ``encode_radio_status`` emits, i.e. what a client sees.
+
+    Scans the function body for ``encode_<type>(&bp, <TLV>, ...)``.  Scoped to
+    that one function on purpose: other encoders in the same translation unit
+    do not feed a channel status consumer, and counting them would report
+    fields as available that never arrive.
+
+    Brace-counts to find the body end rather than matching a column-0 ``}``,
+    so a nested block cannot truncate the scan.  Returns an empty set for
+    source it cannot find the function in -- the caller decides what that
+    means, and a parse miss must not masquerade as "radiod emits nothing".
+    """
+    # ⛔ Find the DEFINITION, not the forward declaration.  ka9q-radio
+    # declares this function near the top of the file and defines it ~670
+    # lines later; taking the first occurrence lands on the prototype, whose
+    # next "{" belongs to some other function entirely.  The brace-match then
+    # walks that unrelated body and reports zero TLVs -- for both revisions,
+    # so the diff sees no change and the check passes on exactly the change
+    # it exists to catch.  Measured against the real source 2026-09-21.
+    brace = -1
+    pos = 0
+    while True:
+        start = text.find(READ_SURFACE_FUNCTION, pos)
+        if start < 0:
+            return set()
+        paren = text.find(")", start)
+        if paren < 0:
+            return set()
+        nxt = text[paren + 1:paren + 40].lstrip()
+        if nxt.startswith("{"):
+            brace = text.index("{", paren)
+            break
+        pos = start + 1
+    depth, i, n = 0, brace, len(text)
+    while i < n:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = text[brace:i]
+    return set(re.findall(r"encode_[A-Za-z0-9_]+\s*\(\s*&bp\s*,\s*([A-Z][A-Z0-9_]*)", body))
+
+
+def _diff_read_surface(pin: set[str], head: set[str]) -> list[FieldChange]:
+    """Changes in what radiod emits, classified by what they cost a client.
+
+    A stream-critical TLV that stops arriving is a `fail`: the client keeps
+    asking, radiod keeps accepting, and the value silently defaults.  Nothing
+    raises.  That silence is the whole reason this check exists.
+    """
+    changes: list[FieldChange] = []
+    for name in sorted(pin - head):
+        rationale = STREAM_CRITICAL_STATUS_TYPES.get(name)
+        if rationale:
+            changes.append(FieldChange(
+                kind="no_longer_emitted", name=name, severity="fail",
+                reason=(f"radiod no longer emits it in status — {rationale}. "
+                        f"Clients reading this field now get a default, "
+                        f"silently."),
+            ))
+        else:
+            changes.append(FieldChange(
+                kind="no_longer_emitted", name=name, severity="warn",
+                reason="no longer emitted in status — non-stream-critical",
+            ))
+    for name in sorted(head - pin):
+        changes.append(FieldChange(
+            kind="newly_emitted", name=name, severity="warn",
+            reason="newly emitted upstream — review for client exposure",
+        ))
+    return changes
+
+
 def _classify_change(enum_class: str, kind: str, name: str) -> tuple[str, str]:
     """Return (severity, reason) for a single change."""
     if kind == "added":
@@ -320,7 +415,11 @@ def analyze(
 
     raw_commits = _commits_between(radio_repo, pin, upstream_sha)
     commits: list[CommitInfo] = []
-    header_paths = set(HEADER_FILES.keys())
+    # ⛔ The emit file belongs here too.  Watching only the headers let a
+    # direction change through: a TLV keeps its name and value while radiod
+    # stops emitting it, every enum compares equal, and this function used to
+    # return "contract intact" without opening radio_status.c.
+    header_paths = set(HEADER_FILES.keys()) | {READ_SURFACE_FILE}
     any_header_touched = False
 
     for sha, subject in raw_commits:
@@ -339,7 +438,7 @@ def analyze(
             header_deltas=[],
             summary=(f"upstream advanced {len(commits)} commit"
                      f"{'s' if len(commits) != 1 else ''}; "
-                     f"no header changes (contract intact)"),
+                     f"no contract-file changes (contract intact)"),
         )
 
     deltas: list[HeaderDelta] = []
@@ -365,6 +464,34 @@ def analyze(
         if changes:
             deltas.append(HeaderDelta(header=header_path, enum=py_class, changes=changes))
 
+    # What radiod EMITS, compared the same way as what it DEFINES.
+    pin_src  = _file_at(radio_repo, pin, READ_SURFACE_FILE)
+    head_src = _file_at(radio_repo, upstream_sha, READ_SURFACE_FILE)
+    if pin_src != head_src:
+        pin_surface  = parse_read_surface(pin_src)  if pin_src  else set()
+        head_surface = parse_read_surface(head_src) if head_src else set()
+        # An unparseable body must not read as "emits nothing" and fail every
+        # TLV at once -- say so instead, and let a human look.
+        if (pin_src and not pin_surface) or (head_src and not head_surface):
+            deltas.append(HeaderDelta(
+                header=READ_SURFACE_FILE, enum="ReadSurface",
+                changes=[FieldChange(
+                    kind="parse_error", name=READ_SURFACE_FUNCTION,
+                    severity="warn",
+                    reason=(f"{READ_SURFACE_FILE} changed but "
+                            f"{READ_SURFACE_FUNCTION} yielded no TLVs at one "
+                            f"or both revisions — the parser failed, the read "
+                            f"surface went UNCHECKED, and that is not the same "
+                            f"as radiod emitting nothing"),
+                )],
+            ))
+        else:
+            surface_changes = _diff_read_surface(pin_surface, head_surface)
+            if surface_changes:
+                deltas.append(HeaderDelta(header=READ_SURFACE_FILE,
+                                          enum="ReadSurface",
+                                          changes=surface_changes))
+
     severity = _aggregate_severity(deltas)
     if severity == "fail":
         n_fail = sum(1 for d in deltas for c in d.changes if c.severity == "fail")
@@ -375,7 +502,7 @@ def analyze(
         summary = (f"{n} header change{'s' if n != 1 else ''}; "
                    f"none stream-critical")
     else:
-        summary = "headers touched but no field-level changes"
+        summary = "contract files touched but no field-level changes"
     return DriftReport(
         severity=severity, pin=pin,
         upstream_ref=upstream_ref, upstream_sha=upstream_sha,
