@@ -102,8 +102,8 @@ def test_decode_frontend_and_gpsdo():
     assert fe.lna_gain == 20
     assert fe.rf_level_cal == pytest.approx(-50.0)
     assert fe.if_power == pytest.approx(-3.0)
-    # input_power_dbm = if_power + rf_level_cal - (lna+mix+if) = -3 - 50 - 35
-    assert fe.input_power_dbm == pytest.approx(-88.0)
+    # control.c ADDS the analog gains: -3 - 50 + (20 + 10 + 5) = -18
+    assert fe.input_power_dbm == pytest.approx(-18.0)
 
 
 @pytest.mark.parametrize("rf_gain, rf_atten, expected", [
@@ -116,6 +116,8 @@ def test_decode_frontend_and_gpsdo():
 ])
 def test_input_power_dbm_rf_gain_and_atten_signs(rf_gain, rf_atten, expected):
     """Mirror radiod control.c: dBm = if_power + |rf_atten| - rf_gain + rf_level_cal.
+
+    (control.c also adds lna/mixer/if gain; test_decode_frontend_and_gpsdo pins that.)
 
     The property once ADDED rf_gain and SUBTRACTED rf_atten, so B4's input read
     about -5 dBm when it was near -34 dBm.
@@ -247,3 +249,12 @@ class TestFilterDropsBothDecoders:
     def test_zero_is_preserved_not_dropped(self):
         from ka9q.control import decode_status_dict
         assert decode_status_dict(self._pkt(0))["filter_drops"] == 0
+
+
+def test_input_power_dbm_none_when_uncalibrated_nan():
+    """radiod sends rf_level_cal = NaN when uncalibrated; control.c then shows no dBm."""
+    pkt = _build_packet(
+        ("float", StatusType.RF_LEVEL_CAL, float("nan")),
+        ("float", StatusType.IF_POWER, -25.0),
+    )
+    assert decode_status_packet(pkt).frontend.input_power_dbm is None

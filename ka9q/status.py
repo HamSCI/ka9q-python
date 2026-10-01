@@ -88,19 +88,20 @@ class FrontendStatus:
         """Absolute input power in dBm if the front-end is calibrated."""
         if self.if_power is None or self.rf_level_cal is None:
             return None
-        # Work back from the A/D level through the analog chain: gain ahead of
-        # the ADC means a weaker input, attenuation a stronger one.  The
-        # rf_atten / rf_gain terms match control.c (+|atten| - rf_gain).
-        # control.c ADDS lna/mixer/if gain; we subtract it, as physics says.
-        analog = 0.0
+        if not math.isfinite(self.rf_level_cal):  # radiod's "not calibrated"
+            return None
+        # Term for term what radiod's control.c displays as "Input":
+        #   if_power + lna + mixer + if_gain + |rf_atten| - rf_gain + rf_level_cal
+        # Keep it identical to control.c, even where a sign looks odd.
+        dbm = self.if_power + self.rf_level_cal
         for v in (self.lna_gain, self.mixer_gain, self.if_gain):
             if v is not None:
-                analog += v
+                dbm += v
         if self.rf_atten is not None:
-            analog -= abs(self.rf_atten)
+            dbm += abs(self.rf_atten)
         if self.rf_gain is not None:
-            analog += self.rf_gain
-        return self.if_power + self.rf_level_cal - analog
+            dbm -= self.rf_gain
+        return dbm
 
 
 @dataclass
