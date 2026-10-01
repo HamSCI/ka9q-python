@@ -106,6 +106,30 @@ def test_decode_frontend_and_gpsdo():
     assert fe.input_power_dbm == pytest.approx(-88.0)
 
 
+@pytest.mark.parametrize("rf_gain, rf_atten, expected", [
+    # B4's RX888, 2026-09-29 01:22Z: radiod's control shows -25.9 dBm.
+    (1.4664, 0.0, -25.8197 + 1.4 - 1.4664),
+    # More VGA gain means a WEAKER input for the same IF level.
+    (14.2, 0.0, -25.8197 + 1.4 - 14.2),
+    # Attenuation ahead of the ADC means a STRONGER input.
+    (0.0, 10.0, -25.8197 + 1.4 + 10.0),
+])
+def test_input_power_dbm_rf_gain_and_atten_signs(rf_gain, rf_atten, expected):
+    """Mirror radiod control.c: dBm = if_power + |rf_atten| - rf_gain + rf_level_cal.
+
+    The property once ADDED rf_gain and SUBTRACTED rf_atten, so B4's input read
+    about -5 dBm when it was near -34 dBm.
+    """
+    pkt = _build_packet(
+        ("float", StatusType.RF_GAIN, rf_gain),
+        ("float", StatusType.RF_ATTEN, rf_atten),
+        ("float", StatusType.RF_LEVEL_CAL, 1.4),
+        ("float", StatusType.IF_POWER, -25.8197),
+    )
+    fe: FrontendStatus = decode_status_packet(pkt).frontend
+    assert fe.input_power_dbm == pytest.approx(expected, abs=1e-4)
+
+
 def test_decode_pll_fm_spectrum():
     pkt = _build_packet(
         ("int", StatusType.OUTPUT_SSRC, 1),

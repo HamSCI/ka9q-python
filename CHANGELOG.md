@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`FrontendStatus.input_power_dbm` had the RF gain and attenuator signs
+  inverted.** It added `rf_gain` and subtracted `rf_atten`. radiod's own
+  display (`control.c`) does the opposite: VGA gain ahead of the ADC means a
+  weaker input, and attenuation a stronger one. On B4's RX888 the property read
+  about -5 dBm while the input sat near -34 dBm, and the error swung with the
+  AGC. It now computes `if_power + rf_level_cal + |rf_atten| - rf_gain -
+  (lna + mixer + if gain)`. The LNA/mixer/IF terms keep their sign, which
+  departs from `control.c` there: that file adds them.
+
 ## 3.25.2 (2026-08-22)
 
 ### Fixed

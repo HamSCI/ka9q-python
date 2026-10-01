@@ -88,15 +88,18 @@ class FrontendStatus:
         """Absolute input power in dBm if the front-end is calibrated."""
         if self.if_power is None or self.rf_level_cal is None:
             return None
-        # control.c: dBm = if_power (dBFS) + rf_level_cal + analog gain chain
+        # Work back from the A/D level through the analog chain: gain ahead of
+        # the ADC means a weaker input, attenuation a stronger one.  The
+        # rf_atten / rf_gain terms match control.c (+|atten| - rf_gain).
+        # control.c ADDS lna/mixer/if gain; we subtract it, as physics says.
         analog = 0.0
         for v in (self.lna_gain, self.mixer_gain, self.if_gain):
             if v is not None:
                 analog += v
         if self.rf_atten is not None:
-            analog += self.rf_atten  # attenuation is signed positive
+            analog -= abs(self.rf_atten)
         if self.rf_gain is not None:
-            analog -= self.rf_gain
+            analog += self.rf_gain
         return self.if_power + self.rf_level_cal - analog
 
 
