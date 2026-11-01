@@ -129,11 +129,12 @@ def parse_rtp_samples(
         if floats is None:
             return None
         if is_iq:
-            # radiod silently downgrades F32 → S16 for some IQ-channel
-            # configurations (high sample rate + wide filter); confirmed on
-            # bee1 2026-05-15 for T6/TSL3 BPSK PPS channel (encoding=4
-            # requested, encoding=2 granted, decoded as F32LE → NaN-poisoned
-            # input, TSL3 dark). Honor the granted encoding above.
+            # Decode with the encoding the channel reports.  A wrong value
+            # here corrupts silently: the bee1 2026-05-15 T6/TSL3 "F32→S16
+            # downgrade" and codar-sounder's 2026-11-01 garbage IQ were both
+            # a stale encoding from ensure_channel (status read before the
+            # separate OUTPUT_ENCODING command landed), not radiod changing
+            # the encoding.  ensure_channel now waits for it to settle.
             if len(floats) % 2 != 0:
                 logger.warning(f"Odd number of samples in IQ payload: {len(floats)}")
                 return None

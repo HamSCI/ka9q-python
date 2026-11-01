@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.26.2 (2026-11-01)
+
+### Fixed
+
+- **`ensure_channel()` now waits for radiod to report the requested
+  encoding.** `create_channel()` sends `OUTPUT_ENCODING` as a separate
+  command after the create, and `ensure_channel()` returned the first status
+  it saw, which could predate that command. A fresh F32 channel then came
+  back labelled S16, and `RadiodStream` decoded 4-byte floats as 2-byte
+  ints: noise-like samples on the 1/32768 grid, rms about 0.58 of full
+  scale, with "completeness 100%". codar-sounder ran this way on AC0G-ND and
+  UACNJ and heard no CODAR all day; with the encoding settled, the same
+  channel showed the Rutgers 13 MHz radars at 32 dB. `ensure_channel()` now
+  re-polls until the reported encoding matches the request, within its
+  `timeout`. If radiod still reports another encoding at the deadline, it
+  logs an error and returns radiod's value, so a stream decodes what is on
+  the wire. Checked live on UACNJ's radiod: a new F32 channel first reported
+  encoding 2 and settled to 4.
+- The comments that blamed radiod for "silently downgrading F32 to S16"
+  (`control.py`, `stream.py`) now name the stale status instead. The bee1
+  2026-05-15 T6/TSL3 incident they cited was very likely the same race.
+
 ## 3.26.1 (2026-10-01)
 
 ### Fixed

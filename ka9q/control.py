@@ -910,7 +910,11 @@ class RadiodControl:
     Sends TLV-encoded commands to radiod's control socket to create
     and configure channels.
     """
-    
+
+    # ensure_channel(): pause between status polls while waiting for radiod
+    # to report the requested OUTPUT_ENCODING.
+    _ENCODING_SETTLE_POLL_S = 0.1
+
     def __init__(self, status_address: str, max_commands_per_sec: int = 100,
                  interface: Optional[str] = None,
                  client_id: Optional[str] = None):
@@ -2072,9 +2076,40 @@ class RadiodControl:
                 f"Channel SSRC {ssrc} not verified within {timeout}s. "
                 f"Requested: {frequency_hz/1e6:.3f} MHz, {preset}, {sample_rate} Hz"
             )
-        # radiod may grant a different encoding (e.g. F32->S16 for some IQ
-        # configs); the returned ChannelInfo carries the granted value, which
-        # consumers use authoritatively.  A rate/preset divergence is logged
+        # create_channel() sends OUTPUT_ENCODING as a separate command after
+        # the create, so the first status can predate it and report the
+        # preset's encoding.  Streams pick their decoder from
+        # ChannelInfo.encoding; a stale S16 on an F32 stream decodes 4-byte
+        # floats as 2-byte ints — noise-like garbage at "100% completeness".
+        # Keep polling until radiod reports the requested encoding.  If it
+        # still differs at the deadline, return what radiod reports (the
+        # stream must decode what is on the wire) and say so loudly.
+        if encoding != 0 and channel.encoding != encoding:
+            deadline = time.monotonic() + timeout
+            stale = channel.encoding
+            while time.monotonic() < deadline:
+                time.sleep(self._ENCODING_SETTLE_POLL_S)
+                fresh = self.poll_channel(
+                    ssrc, expected_freq=frequency_hz,
+                    timeout=max(0.1, min(1.0, deadline - time.monotonic())),
+                    frequency_tolerance=frequency_tolerance,
+                )
+                if fresh is not None:
+                    channel = fresh
+                    if channel.encoding == encoding:
+                        break
+            if channel.encoding == encoding:
+                logger.info(
+                    "ensure_channel: SSRC %s encoding settled %s -> %s",
+                    ssrc, stale, channel.encoding,
+                )
+            else:
+                logger.error(
+                    "ensure_channel: SSRC %s still reports encoding %s after "
+                    "%.1fs (requested %s); returning radiod's value",
+                    ssrc, channel.encoding, timeout, encoding,
+                )
+        # A rate/preset divergence is logged
         # but not fatal — the channel exists at the requested frequency.
         # An ABSENT preset is not a divergence.  radiod may decline to echo
         # PRESET at all (write-only from the nopreset branch on), and a label
