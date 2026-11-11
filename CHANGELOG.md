@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.27.0 (2026-11-11)
+
+### Changed
+
+- **The ka9q-radio pin moves from 401992cd (09-19) to aa52698c (11-02),
+  Phil's main.** `sync_types.py --apply` regenerated `types.py`. The 167
+  commits between them leave the wire format alone: every existing tag keeps
+  its number and its encoded type. Phil changed `encode_float` and
+  `decode_float` to take and return `float`, but a float still travels in
+  4 bytes and a double in 8.
+- **Phil dropped the doppler tags.** Tags 37 and 38 now read `UNUSED6` and
+  `UNUSED7`. `ChannelStatus.doppler` and `doppler_rate` stay, always `None`,
+  so code that reads them keeps running. `set_doppler()` raises and points
+  to `set_sweep()`. The status decoder no longer names the removed tags; it
+  would have raised `AttributeError` on any packet that reached that branch.
+
+### Added
+
+- **Sweep (dechirp) support.** radiod's `SWEEP_RATE`, `SWEEP_DURATION`,
+  `SWEEP_PERIOD` and `SWEEP_START` (118-121) now come from upstream.
+  `RadiodControl.set_sweep()` sets them, and `ChannelStatus` reports them.
+  The epoch pair, `SWEEP_EPOCH_SAMPLE` and `SWEEP_EPOCH_FRAC` (217, 216),
+  stays in `sync_types.py`'s pending-upstream table until Phil takes the
+  dechirp PR and assigns final numbers.
+- **`tests/client_usage_manifest.json` covers what the clients call today.**
+  hf-timestd, hfdl-recorder, meteor-scatter, phase-engine, psk-recorder and
+  wspr-recorder had come to use symbols the contract test never checked.
+
 ## 3.26.2 (2026-11-01)
 
 ### Fixed

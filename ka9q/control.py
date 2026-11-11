@@ -23,7 +23,9 @@ PARAMETERS:
 import socket
 import select
 import struct
+import math
 import secrets
+import warnings
 import logging
 import threading
 import hashlib
@@ -2624,32 +2626,68 @@ class RadiodControl:
         logger.info("Metrics reset")
     
     def set_doppler(self, ssrc: int, doppler_hz: float = 0.0, doppler_rate_hz_per_sec: float = 0.0):
+        """Retired: radiod dropped DOPPLER_FREQUENCY/_RATE in ka9q 64938af7.
+
+        Use :meth:`set_sweep`.  Sends nothing.
         """
-        Set Doppler frequency shift and rate for satellite tracking
-        
+        warnings.warn("set_doppler is retired; radiod dropped DOPPLER (ka9q 64938af7); use set_sweep",
+                      DeprecationWarning, stacklevel=2)
+        raise RuntimeError("radiod dropped DOPPLER (ka9q 64938af7); use set_sweep")
+
+    def set_sweep(self, ssrc: int, rate_hz_per_s: float, period_s: float,
+                  duration_s: Optional[float] = None, start_s: float = 0.0) -> None:
+        """
+        Command a linear sweep (dechirp) on a linear-demod channel.
+
+        Sends all four sweep TLVs, zeros explicit, so a command always
+        replaces the whole sweep.  radiod checks the merged settings after
+        each command and refuses (logs, leaves the channel unswept) a rate
+        without a period, duration > period, or an NCO-limit violation.
+
         Args:
             ssrc: SSRC of the channel
-            doppler_hz: Doppler frequency shift in Hz (default: 0.0)
-            doppler_rate_hz_per_sec: Doppler rate in Hz/sec (default: 0.0)
-        
-        Example:
-            >>> # Track satellite with 5 kHz Doppler shift, changing at 100 Hz/sec
-            >>> control.set_doppler(ssrc=12345, doppler_hz=5000, doppler_rate_hz_per_sec=100)
+            rate_hz_per_s: sweep rate, Hz/s, signed (positive = up); 0 = no sweep
+            period_s: sweep period in seconds (required for a nonzero rate)
+            duration_s: seconds of each period that sweep (default: whole period)
+            start_s: offset added to the sweep time base, seconds (default 0)
+
+        Raises:
+            ValidationError: non-finite value; rate != 0 without
+                0 < period <= 1e6 s; duration outside [0, period]
+
+        Note: SWEEP_EPOCH_SAMPLE/FRAC (217/216), which radiod reports, are
+        provisional until Phil assigns final numbers.
         """
         _validate_ssrc(ssrc)
-        
+        if duration_s is None:
+            duration_s = period_s
+        for nm, v in (("rate", rate_hz_per_s), ("period", period_s),
+                      ("duration", duration_s), ("start", start_s)):
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+                raise ValidationError(f"Sweep {nm} must be a finite number, got {v!r}")
+        if rate_hz_per_s != 0 and not (0 < period_s <= 1e6):
+            raise ValidationError(
+                f"Sweep period must satisfy 0 < period <= 1e6 s with a nonzero rate, got {period_s}")
+        if period_s < 0 or period_s > 1e6:
+            raise ValidationError(f"Sweep period out of range [0, 1e6] s: {period_s}")
+        if not (0 <= duration_s <= period_s):
+            raise ValidationError(
+                f"Sweep duration must satisfy 0 <= duration <= period ({period_s}), got {duration_s}")
+
         cmdbuffer = bytearray()
         cmdbuffer.append(CMD)
-        
-        encode_double(cmdbuffer, StatusType.DOPPLER_FREQUENCY, doppler_hz)
-        encode_double(cmdbuffer, StatusType.DOPPLER_FREQUENCY_RATE, doppler_rate_hz_per_sec)
+        encode_double(cmdbuffer, StatusType.SWEEP_RATE, float(rate_hz_per_s))
+        encode_double(cmdbuffer, StatusType.SWEEP_DURATION, float(duration_s))
+        encode_double(cmdbuffer, StatusType.SWEEP_PERIOD, float(period_s))
+        encode_double(cmdbuffer, StatusType.SWEEP_START, float(start_s))
         encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
         encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
         encode_eol(cmdbuffer)
-        
-        logger.info(f"Setting Doppler for SSRC {ssrc}: freq={doppler_hz} Hz, rate={doppler_rate_hz_per_sec} Hz/s")
+
+        logger.info(f"Setting sweep for SSRC {ssrc}: rate={rate_hz_per_s} Hz/s, "
+                    f"period={period_s} s, duration={duration_s} s, start={start_s} s")
         self.send_command(cmdbuffer)
-    
+
     def set_pll(self, ssrc: int, enable: bool, bandwidth_hz: Optional[float] = None, square: bool = False):
         """
         Configure PLL (Phase-Locked Loop) for carrier tracking in linear modes

@@ -250,6 +250,11 @@ The `--apply` mode updates three files atomically:
 2. `ka9q_radio_compat` — updated with the new commit hash
 3. `ka9q/compat.py` — updated with the new commit hash (importable)
 
+Tags HamSCI defines ahead of upstream (the sweep TLVs) live in
+`PENDING_UPSTREAM_STATUS_TABLE` in `scripts/sync_types.py`; `--apply` re-emits
+them into `types.py`, so it stays idempotent. `--check` fails if upstream
+reuses one of their numbers and warns when upstream gains the name.
+
 ### For Deployment Tooling
 
 `ka9q-update` (or any deployment tool) can read the pinned commit to ensure the correct `radiod` version is running:

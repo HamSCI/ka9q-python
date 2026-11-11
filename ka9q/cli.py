@@ -54,8 +54,6 @@ def _render_status_text(st: ChannelStatus) -> str:
     L.append(f"  First LO:    {_fmt_hz(st.first_lo)}   lock={fe.lock}")
     L.append(f"  Second LO:   {_fmt_hz(st.second_lo)}")
     L.append(f"  Shift:       {_fmt_hz(st.shift)}")
-    if st.doppler:
-        L.append(f"  Doppler:     {_fmt_hz(st.doppler)} @ {st.doppler_rate} Hz/s")
     L.append(f"  Filter:      {_fmt_hz(st.low_edge)} .. {_fmt_hz(st.high_edge)}  (β={st.kaiser_beta})")
     L.append(f"  FE filter:   {_fmt_hz(fe.fe_low_edge)} .. {_fmt_hz(fe.fe_high_edge)}")
     L.append("")

@@ -143,7 +143,7 @@ Tuning & filter:
 - `set_sample_rate(ssrc, sample_rate)`
 - `set_shift_frequency(ssrc, shift_hz)`
 - `set_first_lo(ssrc, frequency_hz)`
-- `set_doppler(ssrc, doppler_hz=0.0, doppler_rate_hz_per_sec=0.0)`
+- `set_sweep(ssrc, rate_hz_per_s, period_s, duration_s=None, start_s=0.0)`  (replaces retired `set_doppler`, which now raises)
 - `set_filter(ssrc, low_edge=None, high_edge=None, kaiser_beta=None)`
 - `set_kaiser_beta(ssrc, beta)`
 - `set_filter2(ssrc, blocksize, kaiser_beta=None)`
@@ -335,8 +335,10 @@ grouped by category:
 
 - **Identification** — `ssrc`, `description`, `preset`, `demod_type`,
   `rtp_pt`, `command_tag`, `gps_time`, `rtp_timesnap`.
-- **Tuning** — `frequency`, `first_lo`, `second_lo`, `shift`,
-  `doppler`, `doppler_rate`.
+- **Tuning** — `frequency`, `first_lo`, `second_lo`, `shift`.
+  (`doppler` and `doppler_rate` remain but stay None: radiod dropped them.)
+- **Sweep** — `sweep_rate`, `sweep_duration`, `sweep_period`, `sweep_start`,
+  `sweep_epoch_sample`, `sweep_epoch_frac`.
 - **Filter** — `low_edge`, `high_edge`, `kaiser_beta`,
   `filter_blocksize`, `filter_fir_length`, `filter_drops`, `noise_bw`.
 - **Squelch / AGC / gain** — `snr_squelch_enable`, `squelch_open`,

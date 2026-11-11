@@ -209,8 +209,16 @@ class ChannelStatus:
     first_lo: Optional[float] = None           # FIRST_LO_FREQUENCY (also in frontend)
     second_lo: Optional[float] = None          # SECOND_LO_FREQUENCY
     shift: Optional[float] = None              # SHIFT_FREQUENCY
-    doppler: Optional[float] = None            # DOPPLER_FREQUENCY
-    doppler_rate: Optional[float] = None       # DOPPLER_FREQUENCY_RATE
+    doppler: Optional[float] = None            # always None: radiod dropped DOPPLER (ka9q 64938af7)
+    doppler_rate: Optional[float] = None       # always None: tags 37/38 are UNUSED6/7 upstream
+
+    # Sweep (dechirp); radiod reports all four on every linear channel
+    sweep_rate: Optional[float] = None         # SWEEP_RATE (Hz/s, signed)
+    sweep_duration: Optional[float] = None     # SWEEP_DURATION (s)
+    sweep_period: Optional[float] = None       # SWEEP_PERIOD (s)
+    sweep_start: Optional[float] = None        # SWEEP_START (s)
+    sweep_epoch_sample: Optional[int] = None   # SWEEP_EPOCH_SAMPLE (signed int64)
+    sweep_epoch_frac: Optional[float] = None   # SWEEP_EPOCH_FRAC (fraction of a sample)
 
     # Filter (primary)
     low_edge: Optional[float] = None           # LOW_EDGE (Hz)
@@ -499,10 +507,21 @@ def decode_status_packet(buffer: bytes) -> Optional[ChannelStatus]:
             st.frequency = decode_double(data, optlen)
         elif t == StatusType.SHIFT_FREQUENCY:
             st.shift = decode_double(data, optlen)
-        elif t == StatusType.DOPPLER_FREQUENCY:
-            st.doppler = decode_double(data, optlen)
-        elif t == StatusType.DOPPLER_FREQUENCY_RATE:
-            st.doppler_rate = decode_double(data, optlen)
+        elif t == StatusType.SWEEP_RATE:
+            st.sweep_rate = decode_double(data, optlen)
+        elif t == StatusType.SWEEP_DURATION:
+            st.sweep_duration = decode_double(data, optlen)
+        elif t == StatusType.SWEEP_PERIOD:
+            st.sweep_period = decode_double(data, optlen)
+        elif t == StatusType.SWEEP_START:
+            st.sweep_start = decode_double(data, optlen)
+        elif t == StatusType.SWEEP_EPOCH_SAMPLE:
+            # Signed: negative early in uptime.  A negative int64 always
+            # arrives as all 8 bytes (no leading zeros to strip).
+            v = decode_int64(data, optlen)
+            st.sweep_epoch_sample = v - (1 << 64) if v >= (1 << 63) else v
+        elif t == StatusType.SWEEP_EPOCH_FRAC:
+            st.sweep_epoch_frac = decode_double(data, optlen)
 
         # ---- Demod class / preset ----
         elif t == StatusType.DEMOD_TYPE:

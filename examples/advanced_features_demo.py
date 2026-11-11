@@ -18,10 +18,10 @@ def main():
     
     print("=== Advanced RadioD Feature Demonstrations ===\n")
     
-    # 1. Doppler tracking for satellite reception
-    print("1. Setting Doppler shift and rate (for satellite tracking)")
-    control.set_doppler(ssrc=ssrc, doppler_hz=-5000, doppler_rate_hz_per_sec=100)
-    print("   ✓ Doppler: -5 kHz, rate: 100 Hz/s\n")
+    # 1. Linear sweep (dechirp), replaces the retired Doppler command
+    print("1. Setting a linear sweep (dechirp)")
+    control.set_sweep(ssrc=ssrc, rate_hz_per_s=-25733.913, period_s=1.0)
+    print("   ✓ Sweep: -25733.913 Hz/s, period 1 s\n")
     
     # 2. PLL configuration for carrier tracking
     print("2. Configuring PLL for coherent AM detection")

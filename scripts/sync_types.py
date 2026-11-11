@@ -247,6 +247,8 @@ def generate_types_py(
     lines.append(f"Validated against ka9q-radio commit: {commit_hash[:12]}")
     lines.append("")
     lines.append("DO NOT EDIT MANUALLY — run: python scripts/sync_types.py --apply")
+    lines.append("Entries marked 'pending upstream' come from PENDING_UPSTREAM_STATUS_TABLE")
+    lines.append("in that script; --apply re-emits them.")
     lines.append('"""')
     lines.append("")
     lines.append("")
@@ -257,6 +259,11 @@ def generate_types_py(
     for name, value, comment in status_entries:
         suffix = f"  # {comment}" if comment else ""
         lines.append(f"    {name} = {value}{suffix}")
+
+    upstream_names = {n for n, _, _ in status_entries}
+    for name, value, comment in PENDING_UPSTREAM_STATUS_TABLE:
+        if name not in upstream_names:
+            lines.append(f"    {name} = {value}  # {comment}; {PENDING_COMMENT}")
 
     lines.append("")
     lines.append("")
@@ -322,6 +329,20 @@ def generate_types_py(
 # ---------------------------------------------------------------------------
 # Diff / check / apply
 # ---------------------------------------------------------------------------
+# StatusType tags HamSCI defines ahead of upstream ka9q-radio (the dechirp
+# branch).  generate_types_py() emits them into types.py so --apply is
+# idempotent; _check_enum() tolerates them as EXTRA, fails if upstream reuses
+# one of the numbers under another name, and warns once upstream has the name
+# (then delete the entry here).
+PENDING_UPSTREAM_STATUS_TABLE = [
+    ("SWEEP_EPOCH_FRAC", 216, "fraction of an input sample after SWEEP_EPOCH_SAMPLE (double)"),
+    ("SWEEP_EPOCH_SAMPLE", 217, "input-counter index of a recent sweep start (SIGNED int64)"),
+]
+PENDING_COMMENT = "pending upstream; Phil assigns final numbers"
+PENDING_UPSTREAM_STATUS = {n for n, _, _ in PENDING_UPSTREAM_STATUS_TABLE}
+_PENDING_BY_VALUE = {v: n for n, v, _ in PENDING_UPSTREAM_STATUS_TABLE}
+
+
 def _check_enum(
     label: str,
     c_entries: List[Tuple[str, int, str]],
@@ -333,6 +354,17 @@ def _check_enum(
         alias_names = set()
     issues: List[str] = []
     c_map = {name: val for name, val, _ in c_entries}
+    if label == "StatusType":
+        for name, val, _ in c_entries:
+            if val in _PENDING_BY_VALUE and name != _PENDING_BY_VALUE[val]:
+                issues.append(
+                    f"{label}: UPSTREAM REUSES pending value {val} "
+                    f"({_PENDING_BY_VALUE[val]}) as {name}"
+                )
+        for name in sorted(PENDING_UPSTREAM_STATUS & set(c_map)):
+            print(f"warning: pending-upstream {name} now exists upstream "
+                  f"(= {c_map[name]}); remove it from PENDING_UPSTREAM_STATUS_TABLE",
+                  file=sys.stderr)
 
     for name, val, comment in c_entries:
         if name not in py_entries:
@@ -345,6 +377,8 @@ def _check_enum(
 
     for name, val in sorted(py_entries.items(), key=lambda x: x[1]):
         if name in alias_names:
+            continue
+        if label == "StatusType" and name in PENDING_UPSTREAM_STATUS:
             continue
         if name not in c_map:
             issues.append(f"{label}: EXTRA in Python  {name} = {val}")

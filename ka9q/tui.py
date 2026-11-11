@@ -127,8 +127,6 @@ class TuningPanel(Panel):
             f"Filter:    {_fmt_hz(st.low_edge)} .. {_fmt_hz(st.high_edge)}",
             f"FE filter: {_fmt_hz(fe.fe_low_edge)} .. {_fmt_hz(fe.fe_high_edge)}",
         ]
-        if st.doppler:
-            lines.append(f"Doppler:   {_fmt_hz(st.doppler)} @ {st.doppler_rate} Hz/s")
         return "\n".join(lines)
 
 
