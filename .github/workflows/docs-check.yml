@@ -1,0 +1,6 @@
+name: docs-check
+on: { push: { branches: [main] }, pull_request: { branches: [main] } }
+jobs:
+  docs:
+    uses: HamSCI/sigmond/.github/workflows/docs-check.yml@main
+    with: { paths: "docs README.md" }
