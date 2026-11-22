@@ -55,6 +55,10 @@
   gets dropped. A run whose timestamps sit on the current stream's RTP line
   holds real stragglers more than `buffer_size` late: recovery has already
   filled their span, so they get dropped as late rather than delivered twice.
+  A run counts as stragglers only within 4 x `buffer_size` behind, and only if
+  recovery zero-filled every one of its sequence numbers since the last break.
+  radiod can re-create a channel exactly on its old RTP line; such a restart
+  still re-syncs.
 - **Interruption ERRORs are rate-limited** to one per 10 s, with a count of
   the ones suppressed. A small backward step on every packet adds a hint: the
   parsed sample count exceeds the RTP step, so the channel count or encoding

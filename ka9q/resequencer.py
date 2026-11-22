@@ -121,6 +121,15 @@ class PacketResequencer:
     # only gets dropped.
     RESYNC_PACKETS = 4
     LINE_ANCHOR_SPAN = 8192
+    # A run counts as stragglers only if it lies within this many
+    # buffer_size behind next_expected_seq, every sequence number in it is
+    # one recovery zero-filled recently (the last FILLED_SEQ_MEMORY), and
+    # its timestamps fit the stream's RTP line.  radiod presets a
+    # re-created channel's RTP in whole blocks from its uptime, so a
+    # restart can land exactly on the old line; a packet recovery never
+    # skipped cannot be a straggler, whatever its timestamp.
+    STRAGGLER_WINDOW_BUFFERS = 4
+    FILLED_SEQ_MEMORY = 256
 
     # Interruption ERRORs: at most one per this many seconds; the rest go
     # to DEBUG and get counted in the next ERROR.
@@ -184,6 +193,9 @@ class PacketResequencer:
         # telling stragglers from a restarted sequence.  Moves at every
         # break and every LINE_ANCHOR_SPAN packets.
         self._line_anchor: Optional[Tuple[int, int]] = None
+        # Sequence numbers recovery skipped (zero-filled) since the last
+        # break; see STRAGGLER_WINDOW_BUFFERS.
+        self._filled_seqs: deque = deque(maxlen=self.FILLED_SEQ_MEMORY)
         self._last_interrupt_log = None
         self._interrupt_logs_suppressed = 0
         
@@ -261,7 +273,7 @@ class PacketResequencer:
             logger.debug(f"Far-behind packet seq={packet.sequence} held as "
                          f"re-sync candidate {len(run)}/{self.RESYNC_PACKETS}")
             return None, []
-        if self._run_fits_old_line(run):
+        if self._run_is_stragglers(run):
             # Real stragglers, more than buffer_size late: recovery has
             # already filled their span.  Re-syncing would deliver that
             # time twice.  They stay counted as late.
@@ -294,6 +306,16 @@ class PacketResequencer:
             return self._try_output()
         return out, gaps
 
+    def _run_is_stragglers(self, run: List[RTPPacket]) -> bool:
+        """Real stragglers: close behind, skipped by recovery, on the line."""
+        behind = -self._seq_distance(self.next_expected_seq, run[0].sequence)
+        if behind > self.STRAGGLER_WINDOW_BUFFERS * self.buffer_size:
+            return False
+        filled = set(self._filled_seqs)
+        if any(p.sequence not in filled for p in run):
+            return False
+        return self._run_fits_old_line(run)
+
     def _run_fits_old_line(self, run: List[RTPPacket]) -> bool:
         """True when the run's timestamps sit on the current stream's RTP
         line: ts - next_expected_ts matches (seq - next_expected_seq) times
@@ -324,6 +346,7 @@ class PacketResequencer:
         self.next_expected_seq = run[0].sequence
         self.next_expected_ts = run[0].timestamp
         self._line_anchor = (run[0].sequence, run[0].timestamp)
+        self._filled_seqs.clear()
         for p in run:
             self._add_to_buffer(p)
         self._interrupt_next = True
@@ -496,7 +519,14 @@ class PacketResequencer:
                 self.next_expected_ts = next_pkt.timestamp
                 chunk_start_ts = next_pkt.timestamp
                 self._line_anchor = (next_pkt.sequence, next_pkt.timestamp)
+                self._filled_seqs.clear()
             elif gap is not None:
+                if recovered:
+                    lost = (next_pkt.sequence - self.next_expected_seq) & 0xFFFF
+                    first = max(0, lost - self.FILLED_SEQ_MEMORY)
+                    self._filled_seqs.extend(
+                        (self.next_expected_seq + i) & 0xFFFF
+                        for i in range(first, lost))
                 gap_events.append(gap)
                 output_samples.append(
                     np.zeros(gap.duration_samples, dtype=next_pkt.samples.dtype))
@@ -663,3 +693,4 @@ class PacketResequencer:
         self._resync_pending = None
         self._interrupt_next = False
         self._line_anchor = None
+        self._filled_seqs.clear()

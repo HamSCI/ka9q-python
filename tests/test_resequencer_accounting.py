@@ -884,3 +884,61 @@ def test_mr8_resync_log_does_not_claim_a_discard(caplog):
         r.process_packet(p)
     msgs = [rec.getMessage() for rec in caplog.records if "re-sync:" in rec.getMessage()]
     assert msgs and "discarded" not in msgs[0]
+
+
+# ── Round 4: a restart that lands on the old RTP line (R3-I1) ──
+
+def _on_line_reset(old_n, new_ts0, bs=64, origin=7_000_000):
+    old = [mk(s, origin + s * N) for s in range(old_n)]
+    new = [mk(k, new_ts0 + k * N) for k in range(old_n + 50)]
+    return old, new
+
+
+@pytest.mark.parametrize("old_n,offset", [
+    (1000, 0),          # static channel, restarted after 1000 packets
+    (1000, 10),         # dynamic channel, same uptime +10 samples
+    (100, 0),           # within 4 x buffer_size behind: only the ring decides
+    (20000, 0),         # static channel, about 7 minutes
+])
+def test_r3i1_restart_on_the_old_line_resyncs_once(old_n, offset):
+    old, new = _on_line_reset(old_n, 7_000_000 + offset)
+    r = PacketResequencer(buffer_size=64, samples_per_packet=N, sample_rate=RATE)
+    first_new_out = None
+    for p in old:
+        r.process_packet(p)
+    for k, p in enumerate(new):
+        s, _ = r.process_packet(p)
+        if first_new_out is None and s is not None:
+            first_new_out = k
+    assert first_new_out is not None and first_new_out <= K
+    assert r.stats.interruptions == 1
+    assert r.stats.packets_late == 0
+
+
+def test_r3i1_static_restart_labels_hold():
+    old, new = _on_line_reset(1000, 7_000_000)
+    run = Run(old + new, buffer_size=64, rate=RATE)
+    check(run, contiguous=False)
+    assert run.delivered == len(old + new) * N
+    assert [g.source for g in run.gaps] == [GapSource.STREAM_INTERRUPTION]
+
+
+def test_r3i1_radiodstream_static_restart():
+    batches = []
+    rs = _radiod_stream(batches, resequence_buffer_size=64)
+    old, new = _on_line_reset(1000, 7_000_000)
+    for p in old + new:
+        rs._process_packet(_rtp(p.sequence, p.timestamp, p.samples))
+    rs.stop()
+    _labels_hold(batches)
+    assert sum(len(s) for s, _ in batches) == len(old + new) * N
+
+
+def test_r3i1_stragglers_still_dropped_with_bigger_buffer():
+    """Stragglers that recovery filled, inside 4 x buffer_size: dropped."""
+    late = list(range(100, 104))
+    order = [s for s in range(300) if s not in late] + late + list(range(300, 320))
+    run = Run(seqs(order), buffer_size=64)
+    check(run)
+    assert run.r.stats.interruptions == 0
+    assert run.r.stats.packets_late == 4
