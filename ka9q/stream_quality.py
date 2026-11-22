@@ -53,7 +53,12 @@ class GapSource(Enum):
     """Initial gap before first packet received"""
     
     STREAM_INTERRUPTION = "stream_interruption"
-    """Extended silence - radiod may have stopped sending"""
+    """Continuity broke: RTP jumped forward past the resequencer's fill bound
+    (an outage longer than max_fill_seconds, or a re-based RTP clock).
+    Nothing was filled, so duration_samples is 0.  The batch carrying it
+    starts at the post-gap packet, and RadiodStream/MultiStream re-base
+    first_rtp_timestamp so first_rtp_timestamp + total_samples_delivered
+    keeps naming the RTP of the next sample."""
 
 
 @dataclass
@@ -150,7 +155,9 @@ class StreamQuality:
     
     # === RTP timing (for applications needing precise timing) ===
     first_rtp_timestamp: int = 0
-    """RTP timestamp of first packet received"""
+    """RTP timestamp of first packet received.  After a STREAM_INTERRUPTION
+    the stream re-bases it so that first_rtp_timestamp + sample index stays
+    the true RTP of every delivered sample."""
     
     last_rtp_timestamp: int = 0
     

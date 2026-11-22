@@ -435,10 +435,14 @@ class RadiodStream:
             self._deliver_samples()
         else:
             final_samples, final_gaps = self.resequencer.flush()
-            if len(final_samples) > 0 or final_gaps:
+            if len(final_samples) > 0:
+                if not self._sample_buffer:
+                    # flush labels its chunk like any other emission.
+                    self._pending_rtp_start = self.resequencer.last_chunk_rtp_start
                 self._sample_buffer.append(final_samples)
-                self._gap_buffer.extend(final_gaps)
-                self._deliver_samples()
+            self._gap_buffer.extend(final_gaps)
+            # Deliver the pending batch even when flush added nothing.
+            self._deliver_samples()
         
         logger.info(
             f"RadiodStream stopped. Completeness: {self.quality.completeness_pct:.1f}%, "
@@ -689,7 +693,24 @@ class RadiodStream:
         
         # Process through resequencer
         output_samples, gap_events = self.resequencer.process_packet(packet)
-        
+
+        if output_samples is not None and any(
+                g.source is GapSource.STREAM_INTERRUPTION for g in gap_events):
+            # The resequencer could not fill this gap, and the chunk opens
+            # at the post-gap packet.  Deliver what came before as its own
+            # batch, then re-base the anchor so that first_rtp_timestamp +
+            # total_samples_delivered still names the next sample's RTP.
+            self._deliver_samples()
+            self.quality.first_rtp_timestamp = (
+                self.resequencer.last_chunk_rtp_start
+                - self.quality.total_samples_delivered) & 0xFFFFFFFF
+
+        # Keep gap events even from a call that produced no output.
+        self._gap_buffer.extend(gap_events)
+        for gap in gap_events:
+            self.quality.total_gap_events += 1
+            self.quality.total_gaps_filled += gap.duration_samples
+
         # Accumulate output
         if output_samples is not None:
             if not self._sample_buffer:
@@ -697,13 +718,7 @@ class RadiodStream:
                 # labels the whole delivered batch.
                 self._pending_rtp_start = self.resequencer.last_chunk_rtp_start
             self._sample_buffer.append(output_samples)
-            self._gap_buffer.extend(gap_events)
             self._packets_since_delivery += 1
-            
-            # Update gap stats
-            for gap in gap_events:
-                self.quality.total_gap_events += 1
-                self.quality.total_gaps_filled += gap.duration_samples
             
             # Deliver if we've accumulated enough
             if self._packets_since_delivery >= self.deliver_interval_packets:
@@ -721,17 +736,22 @@ class RadiodStream:
         return parse_rtp_samples(payload, enc, self._is_iq)
     
     def _record_empty_payload(self, header: RTPHeader):
-        """Record an empty payload as a gap event."""
+        """Record an empty payload as a gap event.
+
+        The event marks the packet; it inserts no samples, so its
+        duration is 0 and it adds nothing to total_gaps_filled.  The
+        packet never reaches the resequencer, which zero-fills whatever
+        span is missing (NETWORK_LOSS) and counts that span once.
+        """
         gap = GapEvent(
             source=GapSource.EMPTY_PAYLOAD,
             position_samples=self.quality.total_samples_delivered,
-            duration_samples=self.samples_per_packet,
+            duration_samples=0,
             timestamp_utc=datetime.now(timezone.utc).isoformat(),
             packets_affected=1,
         )
         self._gap_buffer.append(gap)
         self.quality.total_gap_events += 1
-        self.quality.total_gaps_filled += self.samples_per_packet
     
     def _deliver_samples(self):
         """Deliver accumulated samples to callback."""

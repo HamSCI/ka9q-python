@@ -120,16 +120,24 @@ def test_gap_position_tracks_the_stream():
 
 
 def test_the_gap_survives_a_packet_that_produces_no_output():
-    """MultiStream only harvested gaps when the resequencer also
-    produced output, so a zero packet arriving out of order would have
-    its drop marker discarded -- the stall going silent again, one
-    layer further up."""
+    """MultiStream once harvested gaps only when the resequencer also
+    produced output, and the marker was raised on ARRIVAL, so a zero
+    packet arriving out of order lost its drop marker -- the stall going
+    silent again, one layer further up.
+
+    The marker is now raised as the zeros are EMITTED: a buffered zero
+    packet reports nothing yet, and its marker travels with the zeros
+    themselves, at their true offset in the emitted stream."""
     r = _reseq()
     r.process_packet(_pkt(1, 1000 + N))              # flush the init packet
 
     # seq 3 arrives before seq 2: buffered, nothing emitted yet.
     out, gaps = r.process_packet(_pkt(3, 1000 + 3 * N, _zeros()))
+    assert out is None and gaps == []
 
-    assert out is None                               # nothing delivered...
-    assert len(gaps) == 1                            # ...but the drop is still reported
+    # seq 2 arrives: seq 2 and the zeros of seq 3 leave together.
+    out, gaps = r.process_packet(_pkt(2, 1000 + 2 * N))
+    assert len(gaps) == 1                            # the drop is still reported
     assert gaps[0].source is GapSource.RADIOD_BLOCK_DROP
+    assert gaps[0].position_samples == 3 * N         # true offset of the zeros
+    assert not out[N:].any() and out[:N].all()

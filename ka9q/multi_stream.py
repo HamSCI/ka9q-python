@@ -394,9 +394,14 @@ class MultiStream:
             try:
                 final_samples, final_gaps = slot.resequencer.flush()
                 if final_samples is not None and len(final_samples) > 0:
+                    if not slot.sample_buffer:
+                        # flush labels its chunk like any other emission.
+                        slot.pending_rtp_start = (
+                            slot.resequencer.last_chunk_rtp_start)
                     slot.sample_buffer.append(final_samples)
-                    slot.gap_buffer.extend(final_gaps)
-                    self._deliver(slot)
+                slot.gap_buffer.extend(final_gaps)
+                # Deliver the pending batch even when flush added nothing.
+                self._deliver(slot)
             except Exception:
                 pass
 
@@ -523,22 +528,36 @@ class MultiStream:
                 wallclock=wallclock,
             )
             output, gaps = slot.resequencer.process_packet(packet)
+            self._route_output(slot, output, gaps)
 
-            # Harvest gaps unconditionally.  A radiod zero-block marker
-            # can be reported for a packet that produced no output yet
-            # (arrived out of order and is still buffered); collecting
-            # only inside the branch below discarded it, and the stall
-            # went silent one layer further up.
-            slot.gap_buffer.extend(gaps)
+    def _route_output(self, slot: _ChannelSlot, output, gaps) -> None:
+        """Accumulate one resequencer emission into the slot's batch."""
+        if output is not None and len(output) > 0 and any(
+                g.source is GapSource.STREAM_INTERRUPTION for g in gaps):
+            # The resequencer could not fill this gap, and the chunk opens
+            # at the post-gap packet.  Deliver what came before as its own
+            # batch, then re-base the anchor so that first_rtp_timestamp +
+            # total_samples_delivered still names the next sample's RTP.
+            self._deliver(slot)
+            rebased = (slot.resequencer.last_chunk_rtp_start
+                       - slot.quality.total_samples_delivered) & 0xFFFFFFFF
+            slot.first_rtp_timestamp = rebased
+            slot.quality.first_rtp_timestamp = rebased
 
-            if output is not None and len(output) > 0:
-                if not slot.sample_buffer:
-                    slot.pending_rtp_start = slot.resequencer.last_chunk_rtp_start
-                slot.sample_buffer.append(output)
-                slot.packets_since_delivery += 1
+        # Harvest gaps unconditionally, even from a call that produced no
+        # output; collecting only inside the branch below once discarded a
+        # radiod zero-block marker, and the stall went silent one layer
+        # further up.
+        slot.gap_buffer.extend(gaps)
 
-                if slot.packets_since_delivery >= slot.deliver_interval:
-                    self._deliver(slot)
+        if output is not None and len(output) > 0:
+            if not slot.sample_buffer:
+                slot.pending_rtp_start = slot.resequencer.last_chunk_rtp_start
+            slot.sample_buffer.append(output)
+            slot.packets_since_delivery += 1
+
+            if slot.packets_since_delivery >= slot.deliver_interval:
+                self._deliver(slot)
 
     # ── encoding verification ──
 

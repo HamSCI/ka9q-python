@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The resequencer counted each lost-packet recovery twice.** Both
+  `_handle_lost_packet` and `_try_output` added the recovery's fill and packet
+  to `cumulative_samples` and `stats.samples_output`. Now only `_try_output`
+  and `flush` count, once per emitted sample.
+- **`GapEvent.position_samples` now gives the gap's true offset in the emitted
+  stream.** It used to carry `cumulative_samples` at detection. That value
+  inherited the double count and ignored samples emitted earlier in the same
+  call. A radiod zero-block marker now leaves with its zeros, at their offset,
+  rather than when the packet arrives.
+- **`flush()` orders packets from `next_expected_seq`, wrap-safe.** Across
+  65535 -> 0 it used to emit seq 65535 after 0 and 1. It now counts its fills
+  in `samples_filled` and sets `last_chunk_rtp_start`, so the final batch at
+  stop carries a `delivered_rtp_start`.
+- **A gap longer than `MAX_GAP_SAMPLES` gets its true length.** The old cap
+  truncated the fill, and every client that labels samples as
+  `first_rtp_timestamp + count` slipped by the difference. Gaps up to
+  `max_fill_seconds` (default 120 s) now fill in full. A longer forward jump
+  (a re-based RTP clock, or a very long outage) fills nothing. The resequencer
+  then reports a `STREAM_INTERRUPTION` event (duration 0) and starts a fresh
+  chunk at the post-gap packet. `RadiodStream` and `MultiStream` deliver the
+  samples before the break as their own batch. They then re-base
+  `first_rtp_timestamp`, so `first_rtp_timestamp + total_samples_delivered`
+  still names the RTP of the next sample.
+- **`RadiodStream` keeps gap events from a call that produced no output**, as
+  `MultiStream` already did.
+- **An empty-payload packet no longer counts its span twice.** Its
+  `EMPTY_PAYLOAD` event now carries duration 0 and adds nothing to
+  `total_gaps_filled`. The resequencer fills the missing span, if any, and
+  counts it once.
+- **`stop()` delivers the last pending batch.** `RadiodStream` and
+  `MultiStream` dropped it whenever `flush()` had nothing left to add.
+
 ## 3.27.0 (2026-11-11)
 
 ### Changed

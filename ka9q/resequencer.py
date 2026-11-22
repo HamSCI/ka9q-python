@@ -86,15 +86,26 @@ class PacketResequencer:
             app.on_samples(samples, gap_events)
     """
     
-    # Maximum gap to fill: 60 seconds at 16 kHz = 960,000 samples
-    # Larger gaps indicate stream restart or corruption
+    # Gaps up to this many samples are always zero-filled at their true
+    # length (60 s at 16 kHz).  Kept as the floor of max_fill_samples so
+    # no gap that was filled before is treated differently now.
     MAX_GAP_SAMPLES = 960_000
-    
+
+    # Gaps up to this long are zero-filled at their TRUE length, so that
+    # first_rtp_timestamp + sample index stays the true RTP of every
+    # delivered sample.  A longer forward jump (an RTP clock re-based by a
+    # radiod restart, or an outage longer than this) is not filled: the
+    # stream reports a STREAM_INTERRUPTION and the next chunk starts at the
+    # post-gap packet's own RTP.  The bound exists to cap the fill's memory
+    # (120 s of complex64 at 64 kHz is about 61 MB).
+    DEFAULT_MAX_FILL_SECONDS = 120.0
+
     def __init__(
         self,
         buffer_size: int = 64,
         samples_per_packet: int = 320,
         sample_rate: int = 16000,
+        max_fill_seconds: Optional[float] = None,
     ):
         """
         Initialize resequencer.
@@ -103,10 +114,18 @@ class PacketResequencer:
             buffer_size: Circular buffer size (packets). 64 handles ~2s jitter @ 320 samples/packet
             samples_per_packet: Expected samples per RTP packet
             sample_rate: Sample rate in Hz (for gap duration calculations)
+            max_fill_seconds: Longest gap zero-filled at its true length
+                (default DEFAULT_MAX_FILL_SECONDS; never less than
+                MAX_GAP_SAMPLES samples).  Longer gaps break continuity
+                with a STREAM_INTERRUPTION event instead.
         """
         self.buffer_size = buffer_size
         self.samples_per_packet = samples_per_packet
         self.sample_rate = sample_rate
+        if max_fill_seconds is None:
+            max_fill_seconds = self.DEFAULT_MAX_FILL_SECONDS
+        self.max_fill_samples = max(
+            self.MAX_GAP_SAMPLES, int(max_fill_seconds * sample_rate))
         
         # Circular buffer: sequence_num -> packet
         self.buffer: deque = deque(maxlen=buffer_size)
@@ -142,7 +161,9 @@ class PacketResequencer:
         Returns:
             (samples, gap_events):
             - samples: Continuous sample array ready for output (may include gap fills)
-            - gap_events: List of gaps detected (empty if none)
+            - gap_events: Gaps inside `samples` (empty if none).  Each
+              event's position_samples is its offset in the emitted
+              stream (cumulative from stream start).
         """
         self.stats.packets_received += 1
         
@@ -157,23 +178,21 @@ class PacketResequencer:
             self.stats.packets_duplicate += 1
             return None, []
         
-        # radiod zero-fills a dropped output block, so this packet may
-        # carry synthetic samples with a perfectly contiguous timestamp.
-        # Detect it here, before the resequencer -- which by definition
-        # cannot see it, there being no timestamp gap to find.
-        zero_gap = self._detect_zero_block(packet)
-
         # Add to buffer
         self._add_to_buffer(packet)
         
         # Try to output packets in sequence order
-        samples, gaps = self._try_output()
-        if zero_gap is not None:
-            gaps = list(gaps) + [zero_gap]
-        return samples, gaps
+        return self._try_output()
 
-    def _detect_zero_block(self, packet: RTPPacket) -> Optional[GapEvent]:
+    def _detect_zero_block(self, packet: RTPPacket,
+                           position: int) -> Optional[GapEvent]:
         """A packet of nothing but exact zeros is radiod's drop marker.
+
+        radiod zero-fills a dropped output block, so such a packet carries
+        synthetic samples with a perfectly contiguous timestamp; no
+        timestamp gap exists for the resequencer to find.  Checked as the
+        packet is EMITTED, so the event travels with the zeros it marks and
+        `position` is their offset in the emitted stream.
 
         Cheap on the hot path: real samples almost always have a
         non-zero first element, so the full scan is only reached for
@@ -193,7 +212,7 @@ class PacketResequencer:
         )
         return GapEvent(
             source=GapSource.RADIOD_BLOCK_DROP,
-            position_samples=self.cumulative_samples,
+            position_samples=position,
             duration_samples=n,
             timestamp_utc=datetime.now(timezone.utc).isoformat(),
             packets_affected=1,
@@ -217,11 +236,28 @@ class PacketResequencer:
             # Sync set with deque contents
             actual_seqs = {p.sequence for p in self.buffer}
             self.buffer_seq_nums = actual_seqs
-    
-    def _try_output(self) -> Tuple[Optional[np.ndarray], List[GapEvent]]:
-        """Try to output next packet(s) in sequence"""
+
+    def _ts_gap(self, pkt: RTPPacket) -> int:
+        """Signed 32-bit distance from next_expected_ts to pkt (Phil
+        Karn's technique: handles RTP wrap)."""
+        ts_diff = (pkt.timestamp - self.next_expected_ts) & 0xFFFFFFFF
+        return ts_diff - 0x100000000 if ts_diff >= 0x80000000 else ts_diff
+
+    def _try_output(
+        self, force: bool = False
+    ) -> Tuple[Optional[np.ndarray], List[GapEvent]]:
+        """Output the next packet(s) in sequence, with any gap fills.
+
+        The only place (with flush, which calls it) that counts emitted
+        samples.  `pos` tracks the offset in the emitted stream of the
+        next sample appended, so every gap event carries its true offset.
+
+        force=True (flush) recovers past every hole instead of waiting for
+        the buffer to fill.
+        """
         output_samples = []
         gap_events = []
+        pos = self.cumulative_samples
         # True RTP timestamp of the first sample this call will emit (gap
         # fills included: a fill starts exactly at next_expected_ts).
         # Published via last_chunk_rtp_start so consumers can label the
@@ -237,31 +273,56 @@ class PacketResequencer:
                 if pkt.sequence == self.next_expected_seq:
                     next_pkt = pkt
                     break
-            
+
+            recovered = False
             if next_pkt is None:
-                # Packet not in buffer - check if we should skip ahead
-                if len(self.buffer) >= self.buffer_size // 2:
-                    # Buffer filling up - packet probably lost
-                    samples, gaps = self._handle_lost_packet()
-                    if samples is not None:
-                        output_samples.append(samples)
-                        gap_events.extend(gaps)
-                        continue  # Try to output more
-                break  # Keep waiting
-            
-            # Found next packet - check for timestamp gap
-            if next_pkt.timestamp != self.next_expected_ts:
-                gap = self._detect_gap(next_pkt)
-                if gap is not None:
-                    gap_events.append(gap)
-                    # Insert gap fill
-                    gap_fill = np.zeros(gap.duration_samples, dtype=next_pkt.samples.dtype)
-                    output_samples.append(gap_fill)
-                    self.stats.samples_filled += gap.duration_samples
+                # Packet not in buffer - skip ahead once the buffer fills
+                # (the packet is probably lost), or at flush.
+                if not self.buffer or (
+                        not force and len(self.buffer) < self.buffer_size // 2):
+                    break  # Keep waiting
+                next_pkt = min(
+                    self.buffer,
+                    key=lambda p: self._seq_distance(self.next_expected_seq,
+                                                     p.sequence))
+                recovered = True
+
+            if recovered:
+                gap = self._handle_lost_packet(next_pkt, pos)
+            elif next_pkt.timestamp != self.next_expected_ts:
+                gap = self._detect_gap(next_pkt, pos)
+            else:
+                gap = None
+
+            if gap is not None and gap.source is GapSource.STREAM_INTERRUPTION:
+                if output_samples:
+                    # Never share a chunk across the break: this call ends
+                    # here and the post-gap packet opens the next one, so
+                    # its label (last_chunk_rtp_start) is its own RTP.
+                    break
+                logger.error(
+                    f"RTP jumped {self._ts_gap(next_pkt)} samples at "
+                    f"seq={next_pkt.sequence}, past the "
+                    f"{self.max_fill_samples}-sample fill bound: not filled; "
+                    f"stream continuity breaks at sample {pos} "
+                    f"(STREAM_INTERRUPTION)"
+                )
+                gap_events.append(gap)
+                self.next_expected_ts = next_pkt.timestamp
+                chunk_start_ts = next_pkt.timestamp
+            elif gap is not None:
+                gap_events.append(gap)
+                output_samples.append(
+                    np.zeros(gap.duration_samples, dtype=next_pkt.samples.dtype))
+                self.stats.samples_filled += gap.duration_samples
+                pos += gap.duration_samples
             
             # Remove from buffer and output
             self.buffer.remove(next_pkt)
             self.buffer_seq_nums.discard(next_pkt.sequence)
+            zero_gap = self._detect_zero_block(next_pkt, pos)
+            if zero_gap is not None:
+                gap_events.append(zero_gap)
             output_samples.append(next_pkt.samples)
             
             # Update state
@@ -269,8 +330,11 @@ class PacketResequencer:
             # This handles fragmented IQ packets where each fragment has fewer
             # samples than the nominal samples_per_packet
             actual_samples = len(next_pkt.samples)
+            pos += actual_samples
             self.next_expected_seq = (next_pkt.sequence + 1) & 0xFFFF
             self.next_expected_ts = next_pkt.timestamp + actual_samples
+            if recovered and not force:
+                self.stats.packets_resequenced += 1
         
         # Combine output
         if output_samples:
@@ -281,115 +345,63 @@ class PacketResequencer:
             return combined, gap_events
         
         return None, []
-    
-    def _detect_gap(self, next_pkt: RTPPacket) -> Optional[GapEvent]:
-        """
-        Detect gap using KA9Q signed 32-bit arithmetic technique.
-        
-        This handles RTP timestamp wraps naturally:
-        - Positive difference = forward gap (fill with zeros)
-        - Negative difference = backward jump (ignore, likely reorder)
-        """
-        # Signed 32-bit difference (Phil Karn's technique)
-        ts_diff = (next_pkt.timestamp - self.next_expected_ts) & 0xFFFFFFFF
-        if ts_diff >= 0x80000000:
-            ts_gap = ts_diff - 0x100000000  # Negative
-        else:
-            ts_gap = ts_diff
-        
-        # Only fill forward gaps
+
+    def _gap_event(self, ts_gap: int, position: int,
+                   packets_lost: int) -> Optional[GapEvent]:
+        """The event for a forward gap of ts_gap samples at `position`:
+        NETWORK_LOSS (filled at its true length) up to max_fill_samples,
+        STREAM_INTERRUPTION (nothing filled; continuity broken) beyond."""
         if ts_gap <= 0:
             if ts_gap < 0:
                 logger.debug(f"Backward timestamp jump: {ts_gap} samples (reorder?)")
             return None
-        
-        # Cap absurdly large gaps
-        if ts_gap > self.MAX_GAP_SAMPLES:
-            logger.warning(f"Capping gap from {ts_gap} to {self.MAX_GAP_SAMPLES}")
-            ts_gap = self.MAX_GAP_SAMPLES
-        
+        if ts_gap > self.max_fill_samples:
+            return GapEvent(
+                source=GapSource.STREAM_INTERRUPTION,
+                position_samples=position,
+                duration_samples=0,
+                timestamp_utc=datetime.now(timezone.utc).isoformat(),
+                packets_affected=packets_lost,
+            )
         self.stats.gaps_detected += 1
-        
-        # Estimate packets lost
-        packets_lost = ts_gap // self.samples_per_packet
-        
         logger.warning(
             f"Gap: {ts_gap} samples ({ts_gap / self.sample_rate * 1000:.1f}ms), "
             f"~{packets_lost} packets"
         )
-        
         return GapEvent(
             source=GapSource.NETWORK_LOSS,
-            position_samples=self.cumulative_samples,
+            position_samples=position,
             duration_samples=ts_gap,
             timestamp_utc=datetime.now(timezone.utc).isoformat(),
             packets_affected=packets_lost,
         )
     
-    def _handle_lost_packet(self) -> Tuple[Optional[np.ndarray], List[GapEvent]]:
-        """Handle case where expected packet is definitely lost"""
-        if len(self.buffer) == 0:
-            return None, []
-        
-        # Find earliest packet by sequence
-        earliest = min(
-            self.buffer,
-            key=lambda p: self._seq_distance(self.next_expected_seq, p.sequence)
-        )
-        
-        # Calculate gap
-        ts_diff = (earliest.timestamp - self.next_expected_ts) & 0xFFFFFFFF
-        if ts_diff >= 0x80000000:
-            ts_gap = ts_diff - 0x100000000
-        else:
-            ts_gap = ts_diff
-        
-        gap_events = []
-        output_samples = []
-        
-        # Create gap fill if forward gap
-        if ts_gap > 0:
-            if ts_gap > self.MAX_GAP_SAMPLES:
-                ts_gap = self.MAX_GAP_SAMPLES
-            
-            self.stats.gaps_detected += 1
-            packets_lost = (earliest.sequence - self.next_expected_seq) & 0xFFFF
-            
-            gap = GapEvent(
-                source=GapSource.NETWORK_LOSS,
-                position_samples=self.cumulative_samples,
-                duration_samples=ts_gap,
-                timestamp_utc=datetime.now(timezone.utc).isoformat(),
-                packets_affected=packets_lost,
-            )
-            gap_events.append(gap)
-            
-            gap_fill = np.zeros(ts_gap, dtype=earliest.samples.dtype)
-            output_samples.append(gap_fill)
-            self.stats.samples_filled += ts_gap
-            
+    def _detect_gap(self, next_pkt: RTPPacket,
+                    position: int) -> Optional[GapEvent]:
+        """
+        Gap before the in-sequence packet next_pkt, at stream offset
+        `position`, using KA9Q signed 32-bit arithmetic (handles RTP wrap):
+        - Positive difference = forward gap (fill with zeros)
+        - Negative difference = backward jump (ignore, likely reorder)
+        """
+        ts_gap = self._ts_gap(next_pkt)
+        return self._gap_event(ts_gap, position,
+                               max(ts_gap, 0) // self.samples_per_packet)
+    
+    def _handle_lost_packet(self, earliest: RTPPacket,
+                            position: int) -> Optional[GapEvent]:
+        """Gap before `earliest`, the packet recovery skips ahead to when
+        the expected one is definitely lost.  Counts nothing: the caller
+        emits and counts the fill and the packet."""
+        ts_gap = self._ts_gap(earliest)
+        packets_lost = (earliest.sequence - self.next_expected_seq) & 0xFFFF
+        gap = self._gap_event(ts_gap, position, packets_lost)
+        if gap is not None and gap.source is GapSource.NETWORK_LOSS:
             logger.warning(
                 f"Lost packet recovery: skip to seq={earliest.sequence}, "
                 f"gap={ts_gap} samples"
             )
-        
-        # Remove and output the packet
-        self.buffer.remove(earliest)
-        self.buffer_seq_nums.discard(earliest.sequence)
-        output_samples.append(earliest.samples)
-        
-        # Update state - use actual packet sample count for fragmented packets
-        actual_samples = len(earliest.samples)
-        self.next_expected_seq = (earliest.sequence + 1) & 0xFFFF
-        self.next_expected_ts = earliest.timestamp + actual_samples
-        self.stats.packets_resequenced += 1
-        
-        combined = np.concatenate(output_samples) if output_samples else None
-        if combined is not None:
-            self.stats.samples_output += len(combined)
-            self.cumulative_samples += len(combined)
-        
-        return combined, gap_events
+        return gap
     
     def _seq_distance(self, from_seq: int, to_seq: int) -> int:
         """Calculate forward distance between sequence numbers (handles wrap)"""
@@ -400,36 +412,26 @@ class PacketResequencer:
         """
         Flush remaining packets in buffer (for shutdown).
         
-        Returns all buffered samples in sequence order with any gaps filled.
+        Returns all buffered samples in sequence order (wrap-safe, from
+        next_expected_seq) with any gaps filled, counted and labelled
+        (last_chunk_rtp_start) like any other emission.  Packets past a
+        STREAM_INTERRUPTION are discarded: they cannot share the final
+        chunk with the samples before the break.
         """
-        output_samples = []
-        gap_events = []
-        
-        # Sort by sequence
-        sorted_pkts = sorted(self.buffer, key=lambda p: p.sequence)
-        
-        for pkt in sorted_pkts:
-            # Check for gap
-            if pkt.timestamp != self.next_expected_ts:
-                gap = self._detect_gap(pkt)
-                if gap is not None:
-                    gap_events.append(gap)
-                    gap_fill = np.zeros(gap.duration_samples, dtype=pkt.samples.dtype)
-                    output_samples.append(gap_fill)
-            
-            output_samples.append(pkt.samples)
-            # Use actual packet sample count for fragmented packets
-            self.next_expected_ts = pkt.timestamp + len(pkt.samples)
+        samples, gap_events = None, []
+        if self.initialized:
+            samples, gap_events = self._try_output(force=True)
+        if self.buffer:
+            logger.warning(
+                f"flush: {len(self.buffer)} packet(s) past a stream "
+                f"interruption discarded at shutdown")
         
         # Clear buffer
         self.buffer.clear()
         self.buffer_seq_nums.clear()
         
-        if output_samples:
-            combined = np.concatenate(output_samples)
-            self.stats.samples_output += len(combined)
-            self.cumulative_samples += len(combined)
-            return combined, gap_events
+        if samples is not None:
+            return samples, gap_events
         
         return np.array([], dtype=np.complex64), gap_events
     
