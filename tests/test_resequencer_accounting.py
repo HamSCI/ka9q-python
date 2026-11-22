@@ -829,3 +829,58 @@ def test_multistream_monitor_drops_a_slot_with_packets_but_no_output():
     finally:
         ms.time.sleep = orig
     assert reasons and "no output" in reasons[0]
+
+
+# ── Round 3: stragglers far behind do not re-sync into the past (mr5) ──
+
+def _straggler_order():
+    late = [10, 11, 12, 13]
+    return ([s for s in range(40) if s not in late] + late
+            + list(range(40, 60)))
+
+
+def test_mr5_straggler_burst_is_dropped_not_resynced():
+    run = Run(seqs(_straggler_order()), buffer_size=8)
+    check(run)                                  # contiguous, no repeats
+    assert run.delivered == 60 * N
+    assert run.r.stats.interruptions == 0
+    assert run.r.stats.packets_late == 4
+
+
+def test_mr5_radiodstream_straggler_burst_keeps_the_count():
+    batches = []
+    rs = _radiod_stream(batches, resequence_buffer_size=8)
+    for s in _straggler_order():
+        ts = T0 + s * N
+        rs._process_packet(_rtp(s, ts, _vals(s, ts)))
+    rs.stop()
+    _labels_hold(batches)
+    assert sum(len(b) for b, _ in batches) == 60 * N
+    assert not any(g.source is GapSource.STREAM_INTERRUPTION
+                   for _, q in batches for g in q.batch_gaps)
+
+
+def test_mr5_fragmented_straggler_burst_is_dropped():
+    frag = _frag() + [mk(16 + i, p.timestamp + 800, len(p.samples))
+                      for i, p in enumerate(_frag())]
+    late = [3, 4, 5, 6]
+    order = [p for p in frag if p.sequence not in late] + \
+        [p for p in frag if p.sequence in late]
+    run = Run(order, buffer_size=8)
+    check(run)
+    assert run.r.stats.interruptions == 0
+
+
+def test_mr8_resync_log_does_not_claim_a_discard(caplog):
+    logging.disable(logging.NOTSET)
+    caplog.set_level(logging.WARNING, logger="ka9q.resequencer")
+    old, new = _reset_packets(1000, 0, 5_000_000, skip_old=(1005, 1007))
+    r = PacketResequencer(buffer_size=64, samples_per_packet=N, sample_rate=RATE)
+    G = 10 * 60 * RATE
+    for p in old[:-1]:
+        r.process_packet(p)
+    r.process_packet(mk(1009, old[-1].timestamp + G))   # waits past a break
+    for p in new[:K]:
+        r.process_packet(p)
+    msgs = [rec.getMessage() for rec in caplog.records if "re-sync:" in rec.getMessage()]
+    assert msgs and "discarded" not in msgs[0]

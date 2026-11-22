@@ -52,7 +52,9 @@
   packets in sequence with each other, the resequencer emits what it still
   holds and restarts at the new run with one `STREAM_INTERRUPTION`, so the
   streams re-base as for a forward jump. A lone stale or forged packet only
-  gets dropped.
+  gets dropped. A run whose timestamps sit on the current stream's RTP line
+  holds real stragglers more than `buffer_size` late: recovery has already
+  filled their span, so they get dropped as late rather than delivered twice.
 - **Interruption ERRORs are rate-limited** to one per 10 s, with a count of
   the ones suppressed. A small backward step on every packet adds a hint: the
   parsed sample count exceeds the RTP step, so the channel count or encoding
