@@ -51,7 +51,9 @@ class ResequencerStats:
     packets_received: int = 0
     packets_resequenced: int = 0
     packets_duplicate: int = 0
+    packets_late: int = 0       # arrived behind next_expected_seq; dropped
     gaps_detected: int = 0
+    interruptions: int = 0      # STREAM_INTERRUPTION events (nothing filled)
     samples_output: int = 0
     samples_filled: int = 0
     
@@ -60,7 +62,9 @@ class ResequencerStats:
             'packets_received': self.packets_received,
             'packets_resequenced': self.packets_resequenced,
             'packets_duplicate': self.packets_duplicate,
+            'packets_late': self.packets_late,
             'gaps_detected': self.gaps_detected,
+            'interruptions': self.interruptions,
             'samples_output': self.samples_output,
             'samples_filled': self.samples_filled,
         }
@@ -100,12 +104,19 @@ class PacketResequencer:
     # (120 s of complex64 at 64 kHz is about 61 MB).
     DEFAULT_MAX_FILL_SECONDS = 120.0
 
+    # Absolute memory ceiling on one zero fill, whatever the sample rate:
+    # the fill holds at most this many bytes of the packet's dtype.  At
+    # 192 kS/s complex64 that comes to about 44 s.  A jump past it breaks
+    # continuity (STREAM_INTERRUPTION) instead of filling.
+    DEFAULT_FILL_BYTE_BUDGET = 64 * 1024 * 1024
+
     def __init__(
         self,
         buffer_size: int = 64,
         samples_per_packet: int = 320,
         sample_rate: int = 16000,
         max_fill_seconds: Optional[float] = None,
+        fill_byte_budget: Optional[int] = None,
     ):
         """
         Initialize resequencer.
@@ -118,6 +129,9 @@ class PacketResequencer:
                 (default DEFAULT_MAX_FILL_SECONDS; never less than
                 MAX_GAP_SAMPLES samples).  Longer gaps break continuity
                 with a STREAM_INTERRUPTION event instead.
+            fill_byte_budget: Most bytes one zero fill may hold (default
+                DEFAULT_FILL_BYTE_BUDGET).  Caps the fill below
+                max_fill_seconds at high sample rates.
         """
         self.buffer_size = buffer_size
         self.samples_per_packet = samples_per_packet
@@ -126,6 +140,9 @@ class PacketResequencer:
             max_fill_seconds = self.DEFAULT_MAX_FILL_SECONDS
         self.max_fill_samples = max(
             self.MAX_GAP_SAMPLES, int(max_fill_seconds * sample_rate))
+        self.fill_byte_budget = (self.DEFAULT_FILL_BYTE_BUDGET
+                                 if fill_byte_budget is None
+                                 else int(fill_byte_budget))
         
         # Circular buffer: sequence_num -> packet
         self.buffer: deque = deque(maxlen=buffer_size)
@@ -176,6 +193,17 @@ class PacketResequencer:
         if packet.sequence in self.buffer_seq_nums:
             logger.debug(f"Duplicate packet seq={packet.sequence}")
             self.stats.packets_duplicate += 1
+            return None, []
+
+        # A packet behind next_expected_seq has been emitted already, or
+        # skipped by recovery: a duplicate of an emitted packet, or one more
+        # than buffer_size/2 late.  Letting it in would move the stream
+        # backward (re-emitting old samples, then filling zeros for time
+        # already delivered), so drop it.
+        if self._seq_distance(self.next_expected_seq, packet.sequence) < 0:
+            logger.debug(f"Late packet seq={packet.sequence} dropped "
+                         f"(expecting {self.next_expected_seq})")
+            self.stats.packets_late += 1
             return None, []
         
         # Add to buffer
@@ -287,10 +315,11 @@ class PacketResequencer:
                                                      p.sequence))
                 recovered = True
 
+            limit = self._fill_limit(next_pkt.samples.dtype)
             if recovered:
-                gap = self._handle_lost_packet(next_pkt, pos)
+                gap = self._handle_lost_packet(next_pkt, pos, limit)
             elif next_pkt.timestamp != self.next_expected_ts:
-                gap = self._detect_gap(next_pkt, pos)
+                gap = self._detect_gap(next_pkt, pos, limit)
             else:
                 gap = None
 
@@ -302,11 +331,12 @@ class PacketResequencer:
                     break
                 logger.error(
                     f"RTP jumped {self._ts_gap(next_pkt)} samples at "
-                    f"seq={next_pkt.sequence}, past the "
-                    f"{self.max_fill_samples}-sample fill bound: not filled; "
+                    f"seq={next_pkt.sequence} (fill bound {limit} samples, "
+                    f"backward jumps never filled): not filled; "
                     f"stream continuity breaks at sample {pos} "
                     f"(STREAM_INTERRUPTION)"
                 )
+                self.stats.interruptions += 1
                 gap_events.append(gap)
                 self.next_expected_ts = next_pkt.timestamp
                 chunk_start_ts = next_pkt.timestamp
@@ -346,16 +376,23 @@ class PacketResequencer:
         
         return None, []
 
-    def _gap_event(self, ts_gap: int, position: int,
-                   packets_lost: int) -> Optional[GapEvent]:
-        """The event for a forward gap of ts_gap samples at `position`:
-        NETWORK_LOSS (filled at its true length) up to max_fill_samples,
-        STREAM_INTERRUPTION (nothing filled; continuity broken) beyond."""
-        if ts_gap <= 0:
-            if ts_gap < 0:
-                logger.debug(f"Backward timestamp jump: {ts_gap} samples (reorder?)")
+    def _fill_limit(self, dtype) -> int:
+        """Longest gap zero-filled for samples of `dtype`: max_fill_samples,
+        capped by fill_byte_budget bytes."""
+        itemsize = max(1, np.dtype(dtype).itemsize)
+        return min(self.max_fill_samples, self.fill_byte_budget // itemsize)
+
+    def _gap_event(self, ts_gap: int, position: int, packets_lost: int,
+                   limit: int) -> Optional[GapEvent]:
+        """The event for an RTP jump of ts_gap samples at `position`:
+        NETWORK_LOSS (filled at its true length) for a forward gap up to
+        `limit`; STREAM_INTERRUPTION (nothing filled, continuity broken)
+        for a longer forward gap or any backward jump.  Late and duplicate
+        packets never get here (process_packet drops them), so a backward
+        jump in sequence order means the RTP clock moved."""
+        if ts_gap == 0:
             return None
-        if ts_gap > self.max_fill_samples:
+        if ts_gap < 0 or ts_gap > limit:
             return GapEvent(
                 source=GapSource.STREAM_INTERRUPTION,
                 position_samples=position,
@@ -376,26 +413,27 @@ class PacketResequencer:
             packets_affected=packets_lost,
         )
     
-    def _detect_gap(self, next_pkt: RTPPacket,
-                    position: int) -> Optional[GapEvent]:
+    def _detect_gap(self, next_pkt: RTPPacket, position: int,
+                    limit: int) -> Optional[GapEvent]:
         """
         Gap before the in-sequence packet next_pkt, at stream offset
         `position`, using KA9Q signed 32-bit arithmetic (handles RTP wrap):
-        - Positive difference = forward gap (fill with zeros)
-        - Negative difference = backward jump (ignore, likely reorder)
+        - Positive difference = forward gap (fill with zeros up to `limit`)
+        - Negative difference = backward jump (STREAM_INTERRUPTION)
         """
         ts_gap = self._ts_gap(next_pkt)
         return self._gap_event(ts_gap, position,
-                               max(ts_gap, 0) // self.samples_per_packet)
+                               max(ts_gap, 0) // self.samples_per_packet,
+                               limit)
     
-    def _handle_lost_packet(self, earliest: RTPPacket,
-                            position: int) -> Optional[GapEvent]:
+    def _handle_lost_packet(self, earliest: RTPPacket, position: int,
+                            limit: int) -> Optional[GapEvent]:
         """Gap before `earliest`, the packet recovery skips ahead to when
         the expected one is definitely lost.  Counts nothing: the caller
         emits and counts the fill and the packet."""
         ts_gap = self._ts_gap(earliest)
         packets_lost = (earliest.sequence - self.next_expected_seq) & 0xFFFF
-        gap = self._gap_event(ts_gap, position, packets_lost)
+        gap = self._gap_event(ts_gap, position, packets_lost, limit)
         if gap is not None and gap.source is GapSource.NETWORK_LOSS:
             logger.warning(
                 f"Lost packet recovery: skip to seq={earliest.sequence}, "
@@ -412,29 +450,33 @@ class PacketResequencer:
         """
         Flush remaining packets in buffer (for shutdown).
         
-        Returns all buffered samples in sequence order (wrap-safe, from
+        Returns buffered samples in sequence order (wrap-safe, from
         next_expected_seq) with any gaps filled, counted and labelled
-        (last_chunk_rtp_start) like any other emission.  Packets past a
-        STREAM_INTERRUPTION are discarded: they cannot share the final
-        chunk with the samples before the break.
+        (last_chunk_rtp_start) like any other emission.
+
+        A chunk never spans a STREAM_INTERRUPTION, so flush stops before
+        one and leaves the post-gap packets buffered: call it again while
+        `pending` stays true, and each call returns the next chunk, which
+        opens with the interruption event.
         """
         samples, gap_events = None, []
         if self.initialized:
             samples, gap_events = self._try_output(force=True)
-        if self.buffer:
-            logger.warning(
-                f"flush: {len(self.buffer)} packet(s) past a stream "
-                f"interruption discarded at shutdown")
-        
-        # Clear buffer
-        self.buffer.clear()
-        self.buffer_seq_nums.clear()
+        if samples is None:
+            # Nothing left to emit: drop whatever remains.
+            self.buffer.clear()
+            self.buffer_seq_nums.clear()
         
         if samples is not None:
             return samples, gap_events
         
         return np.array([], dtype=np.complex64), gap_events
     
+    @property
+    def pending(self) -> bool:
+        """True while packets wait in the buffer (see flush)."""
+        return bool(self.buffer)
+
     def get_stats(self) -> dict:
         """Get resequencer statistics"""
         stats = self.stats.to_dict()

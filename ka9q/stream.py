@@ -434,13 +434,17 @@ class RadiodStream:
         if self.raw_payloads:
             self._deliver_samples()
         else:
-            final_samples, final_gaps = self.resequencer.flush()
-            if len(final_samples) > 0:
-                if not self._sample_buffer:
-                    # flush labels its chunk like any other emission.
-                    self._pending_rtp_start = self.resequencer.last_chunk_rtp_start
-                self._sample_buffer.append(final_samples)
-            self._gap_buffer.extend(final_gaps)
+            # flush() stops before a STREAM_INTERRUPTION; each further
+            # call returns the next chunk.  Route every chunk the way a
+            # live packet's output goes, so a break still splits batches,
+            # re-bases the anchor and counts its gaps.
+            for _ in range(len(self.resequencer.buffer) + 1):
+                final_samples, final_gaps = self.resequencer.flush()
+                self._route_output(
+                    final_samples if len(final_samples) > 0 else None,
+                    final_gaps)
+                if not self.resequencer.pending:
+                    break
             # Deliver the pending batch even when flush added nothing.
             self._deliver_samples()
         
@@ -693,7 +697,16 @@ class RadiodStream:
         
         # Process through resequencer
         output_samples, gap_events = self.resequencer.process_packet(packet)
+        self._route_output(output_samples, gap_events)
 
+        # Update timing
+        if wallclock:
+            self.quality.last_packet_utc = datetime.fromtimestamp(
+                wallclock, tz=timezone.utc
+            ).isoformat()
+
+    def _route_output(self, output_samples, gap_events) -> None:
+        """Accumulate one resequencer emission into the pending batch."""
         if output_samples is not None and any(
                 g.source is GapSource.STREAM_INTERRUPTION for g in gap_events):
             # The resequencer could not fill this gap, and the chunk opens
@@ -723,12 +736,6 @@ class RadiodStream:
             # Deliver if we've accumulated enough
             if self._packets_since_delivery >= self.deliver_interval_packets:
                 self._deliver_samples()
-        
-        # Update timing
-        if wallclock:
-            self.quality.last_packet_utc = datetime.fromtimestamp(
-                wallclock, tz=timezone.utc
-            ).isoformat()
     
     def _parse_samples(self, payload: bytes) -> Optional[np.ndarray]:
         """Parse samples from RTP payload based on channel encoding."""
@@ -792,6 +799,7 @@ class RadiodStream:
             self.quality.rtp_packets_lost = reseq_stats.get('gaps_detected', 0)
             self.quality.rtp_packets_resequenced = reseq_stats.get('packets_resequenced', 0)
             self.quality.rtp_packets_duplicate = reseq_stats.get('packets_duplicate', 0)
+            self.quality.rtp_packets_late = reseq_stats.get('packets_late', 0)
         
         # Clear buffers
         self._sample_buffer = []

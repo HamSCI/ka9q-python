@@ -33,6 +33,25 @@
   `EMPTY_PAYLOAD` event now carries duration 0 and adds nothing to
   `total_gaps_filled`. The resequencer fills the missing span, if any, and
   counts it once.
+- **The zero fill has an absolute ceiling: 64 MiB of the sample dtype**
+  (`fill_byte_budget`), as well as `max_fill_seconds`. At 192 kS/s complex64
+  that allows about 44 s. A longer jump becomes a `STREAM_INTERRUPTION`.
+- **A backward RTP jump now breaks continuity the same way** as a forward jump
+  past the bound. It used to pass silently and leave
+  `first_rtp_timestamp + count` wrong for the rest of the stream.
+- **The resequencer drops a packet that arrives behind `next_expected_seq`**:
+  a duplicate of a packet already emitted, or one more than `buffer_size/2`
+  late. It used to re-emit old samples and then fill zeros for time already
+  delivered. `stats.packets_late` counts the drops, and RadiodStream reports
+  them as `rtp_packets_late`. `stats.interruptions` counts interruptions.
+- **`flush()` stops before a `STREAM_INTERRUPTION`** and keeps the post-gap
+  packets for the next call (`pending` tells when more remain). `stop()` in
+  RadiodStream and MultiStream drains it chunk by chunk, so the post-gap
+  samples form their own batch with their own label and a re-based anchor.
+  RadiodStream's `stop()` now counts the flushed gaps in its totals.
+- **MultiStream hands its callback a copy of the quality object**, as
+  RadiodStream does, so a later re-base cannot change a delivered batch's
+  anchor.
 - **`stop()` delivers the last pending batch.** `RadiodStream` and
   `MultiStream` dropped it whenever `flush()` had nothing left to add.
 

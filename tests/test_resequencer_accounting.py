@@ -481,3 +481,174 @@ def test_multistream_stop_flush_batch_carries_its_label():
     m.stop()
     assert sum(len(s) for s, _ in batches) == 4 * N
     _labels_hold(batches)
+
+
+# ── Round 1 (review 2026-11-22): I2-I5 ──
+
+# I5: a packet behind next_expected_seq never re-enters the stream.
+SCENARIOS["i5_a_duplicate_after_emission"] = dict(
+    packets=seqs(list(range(0, 6))) + [mk(3, T0 + 3 * N)]
+    + seqs(list(range(6, 20)) + list(range(21, 31))))
+SCENARIOS["i5_b_packet_later_than_half_buffer"] = dict(
+    packets=seqs([0, 1, 2] + list(range(4, 12)) + [3] + list(range(12, 16))))
+
+
+@pytest.mark.parametrize("name", ["i5_a_duplicate_after_emission",
+                                  "i5_b_packet_later_than_half_buffer"])
+def test_i5_stale_packet_is_dropped_and_counted(name):
+    run = Run(**SCENARIOS[name])
+    check(run)
+    assert run.r.stats.packets_late == 1
+    s = run.stream()
+    nz = s[s != 0]
+    assert len(np.unique(nz)) == len(nz)          # nothing emitted twice
+
+
+def test_i5_stale_packet_across_seq_wrap():
+    pk = [mk(s, T0 + (s - 65532) * N) for s in range(65532, 65540)]
+    pk.insert(6, mk(65533, T0 + N))               # stale, seq wrapped since
+    run = Run(pk)
+    check(run)
+    assert run.r.stats.packets_late == 1
+
+
+def test_i5_radiodstream_reports_late_packets():
+    batches = []
+    rs = _radiod_stream(batches, deliver_interval_packets=1)
+    for seq in [0, 1, 2, 3, 4, 2, 5, 6]:
+        rs._process_packet(_rtp(seq, T0 + seq * N, _vals(seq, T0 + seq * N)))
+    rs.stop()
+    assert rs.quality.rtp_packets_late == 1
+    _labels_hold(batches)
+
+
+# I4: a backward RTP jump breaks continuity like a forward one.
+
+def test_i4_backward_jump_is_an_interruption():
+    B = 10 * 60 * RATE
+    base = T0 + B
+    pk = [mk(s, base + s * N - (B if s >= 4 else 0)) for s in range(10)]
+    run = Run(pk, rate=RATE)
+    check(run, contiguous=False)
+    assert [g.source for g in run.gaps] == [GapSource.STREAM_INTERRUPTION]
+
+
+def test_i4_radiodstream_rebases_on_a_backward_jump():
+    batches = []
+    rs = _radiod_stream(batches)
+    B = 10 * 60 * RATE
+    for seq in range(16):
+        ts = T0 + B + seq * N - (B if seq >= 5 else 0)
+        rs._process_packet(_rtp(seq, ts, _vals(seq, ts)))
+    rs.stop()
+    _labels_hold(batches)
+    events = [g for _, q in batches for g in q.batch_gaps]
+    assert [g.source for g in events] == [GapSource.STREAM_INTERRUPTION]
+
+
+# I3: an absolute byte budget on the zero fill.
+
+def test_i3_fill_limit_is_a_byte_budget():
+    r = PacketResequencer(sample_rate=192_000)
+    budget = PacketResequencer.DEFAULT_FILL_BYTE_BUDGET
+    assert budget == 64 * 1024 * 1024
+    assert r._fill_limit(np.dtype(np.complex64)) == budget // 8
+    assert r._fill_limit(np.dtype(np.float32)) == budget // 4
+    slow = PacketResequencer(sample_rate=16_000)
+    assert slow._fill_limit(np.dtype(np.complex64)) == 120 * 16_000
+
+
+def test_i3_jump_past_the_byte_budget_is_an_interruption():
+    G = 200_000                                # 12.5 s at 16 kHz
+    pk = [mk(0, T0), mk(1, T0 + N), mk(2, T0 + 2 * N + G), mk(3, T0 + 3 * N + G)]
+    # float64 samples: 1 MiB holds 131072 of them, fewer than G.
+    run = Run(pk, rate=RATE, fill_byte_budget=1 << 20)
+    assert [g.source for g in run.gaps] == [GapSource.STREAM_INTERRUPTION]
+    check(run, contiguous=False)
+    # A budget that holds G fills it in full.
+    run = Run(pk, rate=RATE, fill_byte_budget=G * 8)
+    assert [g.duration_samples for g in run.gaps] == [G]
+    check(run)
+
+
+# I2: stop() with a post-gap packet waiting in the buffer.
+
+def _late_break_order():
+    G = 10 * 60 * RATE
+    return [(seq, T0 + seq * N + (G if seq >= 4 else 0)) for seq in (0, 1, 2, 4, 3)]
+
+
+def test_i2_radiodstream_stop_splits_at_a_waiting_interruption():
+    batches = []
+    rs = _radiod_stream(batches, deliver_interval_packets=10,
+                        resequence_buffer_size=16)
+    for seq, ts in _late_break_order():
+        rs._process_packet(_rtp(seq, ts, _vals(seq, ts)))
+    rs.stop()
+    assert [len(s) for s, _ in batches] == [4 * N, N]
+    _labels_hold(batches)
+    assert rs.quality.total_gap_events == 1
+
+
+def test_i2_multistream_stop_splits_at_a_waiting_interruption():
+    batches = []
+    m = MultiStream(control=None)
+    slot = _slot(lambda s, q: batches.append((s.copy(), q.copy())))
+    slot.deliver_interval = 10
+    slot.resequencer = PacketResequencer(buffer_size=16, samples_per_packet=N,
+                                         sample_rate=RATE)
+    slot.first_rtp_timestamp = slot.quality.first_rtp_timestamp = T0
+    for seq, ts in _late_break_order():
+        out, gaps = slot.resequencer.process_packet(mk(seq, ts))
+        m._route_output(slot, out, gaps)
+    m._slots = {7: slot}
+    m._running = True
+    m.stop()
+    assert [len(s) for s, _ in batches] == [4 * N, N]
+    _labels_hold(batches)
+
+
+def test_flush_keeps_packets_past_an_interruption_for_the_next_flush():
+    G = 10 * 60 * RATE
+    r = PacketResequencer(buffer_size=16, samples_per_packet=N, sample_rate=RATE)
+    for seq in (0, 1, 3):
+        r.process_packet(mk(seq, T0 + seq * N))
+    r.process_packet(mk(4, T0 + 4 * N + G))
+    s1, g1 = r.flush()                        # the fill for seq 2, then seq 3
+    s2, g2 = r.flush()                        # the post-gap packet
+    assert [g.source for g in g2] == [GapSource.STREAM_INTERRUPTION]
+    assert r.last_chunk_rtp_start == (T0 + 4 * N + G) % M32
+    assert int(s2[0]) - 1 == T0 + 4 * N + G
+    assert len(r.buffer) == 0
+
+
+# m1, m2, m4
+
+def test_m1_radiodstream_stop_counts_flush_gaps():
+    batches = []
+    rs = _radiod_stream(batches, deliver_interval_packets=1,
+                        resequence_buffer_size=16)
+    for seq in (0, 1, 3):
+        rs._process_packet(_rtp(seq, T0 + seq * N, _vals(seq, T0 + seq * N)))
+    rs.stop()
+    assert rs.quality.total_gap_events == 1
+    assert rs.quality.total_gaps_filled == N
+
+
+def test_m2_interruptions_are_counted():
+    G = 10 * 60 * RATE
+    run = Run([mk(s, T0 + s * N + (G if s >= 3 else 0)) for s in range(6)],
+              rate=RATE)
+    assert run.r.stats.interruptions == 1
+    assert run.r.get_stats()['interruptions'] == 1
+
+
+def test_m4_multistream_hands_the_callback_a_copy():
+    seen = []
+    m = MultiStream(control=None)
+    slot = _slot(lambda s, q: seen.append(q))
+    slot.deliver_interval = 1
+    for seq in range(3):
+        out, gaps = slot.resequencer.process_packet(mk(seq, T0 + seq * N))
+        m._route_output(slot, out, gaps)
+    assert seen and all(q is not slot.quality for q in seen)

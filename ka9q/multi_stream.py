@@ -392,14 +392,13 @@ class MultiStream:
         # Flush all resequencers
         for ssrc, slot in self._slots.items():
             try:
-                final_samples, final_gaps = slot.resequencer.flush()
-                if final_samples is not None and len(final_samples) > 0:
-                    if not slot.sample_buffer:
-                        # flush labels its chunk like any other emission.
-                        slot.pending_rtp_start = (
-                            slot.resequencer.last_chunk_rtp_start)
-                    slot.sample_buffer.append(final_samples)
-                slot.gap_buffer.extend(final_gaps)
+                # flush() stops before a STREAM_INTERRUPTION; each further
+                # call returns the next chunk, routed like live output.
+                for _ in range(len(slot.resequencer.buffer) + 1):
+                    final_samples, final_gaps = slot.resequencer.flush()
+                    self._route_output(slot, final_samples, final_gaps)
+                    if not slot.resequencer.pending:
+                        break
                 # Deliver the pending batch even when flush added nothing.
                 self._deliver(slot)
             except Exception:
@@ -681,7 +680,9 @@ class MultiStream:
         slot.quality.delivered_rtp_start = slot.pending_rtp_start
 
         try:
-            slot.on_samples(combined, slot.quality)
+            # A copy: the slot's quality keeps changing (an interruption
+            # re-bases first_rtp_timestamp right after this delivery).
+            slot.on_samples(combined, slot.quality.copy())
         except Exception:
             logger.exception(
                 f"MultiStream: callback error for SSRC {slot.channel_info.ssrc}"
