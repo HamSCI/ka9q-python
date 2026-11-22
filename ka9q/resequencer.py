@@ -25,6 +25,7 @@ Design principle: Sample count integrity > real-time delivery
 
 import numpy as np
 import logging
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional, Tuple, List
@@ -110,6 +111,20 @@ class PacketResequencer:
     # continuity (STREAM_INTERRUPTION) instead of filling.
     DEFAULT_FILL_BYTE_BUDGET = 64 * 1024 * 1024
 
+    # A packet up to buffer_size sequence numbers behind next_expected_seq
+    # counts as late (a duplicate, or a straggler recovery already skipped)
+    # and gets dropped.  One further behind may belong to a restarted
+    # sequence: radiod re-creates a channel from its template, so the
+    # sequence starts again from the template's value.  After this many
+    # such packets in sequence with each other, the resequencer re-syncs
+    # to the new run (STREAM_INTERRUPTION).  A lone stale or forged packet
+    # only gets dropped.
+    RESYNC_PACKETS = 4
+
+    # Interruption ERRORs: at most one per this many seconds; the rest go
+    # to DEBUG and get counted in the next ERROR.
+    INTERRUPTION_LOG_INTERVAL_SEC = 10.0
+
     def __init__(
         self,
         buffer_size: int = 64,
@@ -159,6 +174,13 @@ class PacketResequencer:
         
         # Statistics
         self.stats = ResequencerStats()
+
+        # Sequence-reset detection (see RESYNC_PACKETS)
+        self._resync_run: List[RTPPacket] = []
+        self._resync_pending: Optional[List[RTPPacket]] = None
+        self._interrupt_next = False
+        self._last_interrupt_log = None
+        self._interrupt_logs_suppressed = 0
         
         logger.debug(
             f"PacketResequencer: buffer={buffer_size}, "
@@ -188,6 +210,9 @@ class PacketResequencer:
         if not self.initialized:
             self._initialize(packet)
             return None, []
+
+        if self._resync_pending is not None:
+            self._apply_resync()
         
         # Check for duplicate
         if packet.sequence in self.buffer_seq_nums:
@@ -199,18 +224,86 @@ class PacketResequencer:
         # skipped by recovery: a duplicate of an emitted packet, or one more
         # than buffer_size/2 late.  Letting it in would move the stream
         # backward (re-emitting old samples, then filling zeros for time
-        # already delivered), so drop it.
-        if self._seq_distance(self.next_expected_seq, packet.sequence) < 0:
-            logger.debug(f"Late packet seq={packet.sequence} dropped "
-                         f"(expecting {self.next_expected_seq})")
+        # already delivered), so drop it.  Far behind, it may instead open
+        # a restarted sequence (see RESYNC_PACKETS).
+        behind = -self._seq_distance(self.next_expected_seq, packet.sequence)
+        if behind > 0:
             self.stats.packets_late += 1
-            return None, []
+            if behind <= self.buffer_size:
+                logger.debug(f"Late packet seq={packet.sequence} dropped "
+                             f"(expecting {self.next_expected_seq})")
+                return None, []
+            return self._resync_candidate(packet)
+        self._resync_run = []
         
         # Add to buffer
         self._add_to_buffer(packet)
         
         # Try to output packets in sequence order
         return self._try_output()
+
+    def _resync_candidate(
+        self, packet: RTPPacket
+    ) -> Tuple[Optional[np.ndarray], List[GapEvent]]:
+        """A packet far behind next_expected_seq.  Collect a run of them in
+        sequence with each other; at RESYNC_PACKETS, re-sync to the run."""
+        run = self._resync_run
+        if run and packet.sequence == (run[-1].sequence + 1) & 0xFFFF:
+            run.append(packet)
+        else:
+            self._resync_run = run = [packet]
+        if len(run) < self.RESYNC_PACKETS:
+            logger.debug(f"Far-behind packet seq={packet.sequence} held as "
+                         f"re-sync candidate {len(run)}/{self.RESYNC_PACKETS}")
+            return None, []
+        # The run's packets were counted as late; they are not.
+        self.stats.packets_late -= len(run)
+        self._resync_run = []
+        logger.warning(
+            f"RTP sequence restarted: {len(run)} packets in sequence from "
+            f"seq={run[0].sequence}, expected {self.next_expected_seq}; "
+            f"re-syncing (radiod restart or channel re-created)")
+        self._resync_pending = run
+        if not self.buffer:
+            self._apply_resync()
+            return self._try_output()
+        # Emit the old stream's pending packets first, as their own chunk.
+        # The re-sync applies on the next call (or flush).
+        out, gaps = self._try_output(force=True)
+        if self.buffer:
+            logger.warning(f"re-sync: {len(self.buffer)} old packet(s) past "
+                           f"an interruption discarded")
+        if out is None:
+            self._apply_resync()
+            return self._try_output()
+        return out, gaps
+
+    def _apply_resync(self) -> None:
+        """Restart the stream at the held run of a restarted sequence."""
+        run, self._resync_pending = self._resync_pending, None
+        self.buffer.clear()
+        self.buffer_seq_nums.clear()
+        self.next_expected_seq = run[0].sequence
+        self.next_expected_ts = run[0].timestamp
+        for p in run:
+            self._add_to_buffer(p)
+        self._interrupt_next = True
+
+    def _log_interruption(self, msg: str) -> None:
+        """ERROR at most once per INTERRUPTION_LOG_INTERVAL_SEC."""
+        now = time.monotonic()
+        if (self._last_interrupt_log is not None and
+                now - self._last_interrupt_log
+                < self.INTERRUPTION_LOG_INTERVAL_SEC):
+            self._interrupt_logs_suppressed += 1
+            logger.debug(msg)
+            return
+        if self._interrupt_logs_suppressed:
+            msg += (f" [{self._interrupt_logs_suppressed} more since the "
+                    f"last report; {self.stats.interruptions} in all]")
+        self._interrupt_logs_suppressed = 0
+        self._last_interrupt_log = now
+        logger.error(msg)
 
     def _detect_zero_block(self, packet: RTPPacket,
                            position: int) -> Optional[GapEvent]:
@@ -293,6 +386,22 @@ class PacketResequencer:
         # packet's header desynchronizes labels from delivered samples
         # under loss (hf-timestd T6 origin slips, 2026-08-11).
         chunk_start_ts = self.next_expected_ts
+
+        if self._interrupt_next:
+            # This chunk opens a re-synced sequence (see _apply_resync).
+            self._interrupt_next = False
+            self.stats.interruptions += 1
+            self._log_interruption(
+                f"stream continuity breaks at sample {pos}: RTP sequence "
+                f"restarted at seq={self.next_expected_seq} "
+                f"(STREAM_INTERRUPTION)")
+            gap_events.append(GapEvent(
+                source=GapSource.STREAM_INTERRUPTION,
+                position_samples=pos,
+                duration_samples=0,
+                timestamp_utc=datetime.now(timezone.utc).isoformat(),
+                packets_affected=0,
+            ))
         
         while True:
             # Look for next expected sequence number
@@ -329,14 +438,20 @@ class PacketResequencer:
                     # here and the post-gap packet opens the next one, so
                     # its label (last_chunk_rtp_start) is its own RTP.
                     break
-                logger.error(
-                    f"RTP jumped {self._ts_gap(next_pkt)} samples at "
+                jump = self._ts_gap(next_pkt)
+                hint = ""
+                if -len(next_pkt.samples) <= jump < 0:
+                    hint = (" -- a small backward step on every packet means "
+                            "the parsed sample count exceeds the RTP step: "
+                            "channel count or encoding mismatch?")
+                self.stats.interruptions += 1
+                self._log_interruption(
+                    f"RTP jumped {jump} samples at "
                     f"seq={next_pkt.sequence} (fill bound {limit} samples, "
                     f"backward jumps never filled): not filled; "
                     f"stream continuity breaks at sample {pos} "
-                    f"(STREAM_INTERRUPTION)"
+                    f"(STREAM_INTERRUPTION){hint}"
                 )
-                self.stats.interruptions += 1
                 gap_events.append(gap)
                 self.next_expected_ts = next_pkt.timestamp
                 chunk_start_ts = next_pkt.timestamp
@@ -460,7 +575,12 @@ class PacketResequencer:
         opens with the interruption event.
         """
         samples, gap_events = None, []
+        if self._resync_pending is not None and not self.buffer:
+            self._apply_resync()
         if self.initialized:
+            samples, gap_events = self._try_output(force=True)
+        if samples is None and self._resync_pending is not None:
+            self._apply_resync()
             samples, gap_events = self._try_output(force=True)
         if samples is None:
             # Nothing left to emit: drop whatever remains.
@@ -475,7 +595,7 @@ class PacketResequencer:
     @property
     def pending(self) -> bool:
         """True while packets wait in the buffer (see flush)."""
-        return bool(self.buffer)
+        return bool(self.buffer) or self._resync_pending is not None
 
     def get_stats(self) -> dict:
         """Get resequencer statistics"""
@@ -494,3 +614,6 @@ class PacketResequencer:
         self.next_expected_ts = None
         self.cumulative_samples = 0
         self.stats = ResequencerStats()
+        self._resync_run = []
+        self._resync_pending = None
+        self._interrupt_next = False

@@ -83,6 +83,10 @@ class _ChannelSlot:
     pending_rtp_start: object = None   # first-sample RTP of the pending batch
     deliver_interval: int = 10
     last_packet_time: float = 0.0
+    # Time of the last resequencer OUTPUT.  Packets can keep arriving while
+    # nothing comes out (a wedged resequencer); raw receipt alone would
+    # call that slot healthy.
+    last_output_time: float = 0.0
     dropped: bool = False
     first_rtp_timestamp: Optional[int] = None
     lifetime: Optional[int] = None
@@ -491,6 +495,10 @@ class MultiStream:
                 continue
 
             slot.last_packet_time = time.time()
+            # The first packet arms the output timer too, so a slot whose
+            # packets arrive but never come out still trips it.
+            if slot.last_output_time == 0.0:
+                slot.last_output_time = slot.last_packet_time
             slot.quality.rtp_packets_received += 1
 
             if slot.first_rtp_timestamp is None:
@@ -550,6 +558,7 @@ class MultiStream:
         slot.gap_buffer.extend(gaps)
 
         if output is not None and len(output) > 0:
+            slot.last_output_time = time.time()
             if not slot.sample_buffer:
                 slot.pending_rtp_start = slot.resequencer.last_chunk_rtp_start
             slot.sample_buffer.append(output)
@@ -716,6 +725,14 @@ class MultiStream:
                             f"No packets for {silence:.1f}s "
                             f"(timeout: {self._drop_timeout_sec}s)",
                         )
+                    elif (slot.last_output_time > 0 and
+                          now - slot.last_output_time > self._drop_timeout_sec):
+                        self._handle_drop(
+                            ssrc, slot,
+                            f"packets arriving but no output for "
+                            f"{now - slot.last_output_time:.1f}s "
+                            f"(timeout: {self._drop_timeout_sec}s)",
+                        )
                     elif self._gap_storm(slot, check_interval):
                         self._handle_drop(
                             ssrc, slot,
@@ -792,6 +809,7 @@ class MultiStream:
             slot.packets_since_delivery = 0
             slot.last_gaps = 0
             slot.gap_storm_secs = 0.0
+            slot.last_output_time = 0.0
 
             logger.info(
                 f"MultiStream: {slot.frequency_hz/1e6:.3f} MHz restored "

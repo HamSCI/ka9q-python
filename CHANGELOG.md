@@ -44,6 +44,22 @@
   late. It used to re-emit old samples and then fill zeros for time already
   delivered. `stats.packets_late` counts the drops, and RadiodStream reports
   them as `rtp_packets_late`. `stats.interruptions` counts interruptions.
+- **A restarted RTP sequence re-syncs the stream.** radiod re-creates a
+  channel from its template, so after a radiod restart or a re-created channel
+  the sequence starts again from the template's value. The resequencer drops
+  as late only packets up to `buffer_size` behind `next_expected_seq`. A packet
+  further behind becomes a re-sync candidate. After `RESYNC_PACKETS` (4) such
+  packets in sequence with each other, the resequencer emits what it still
+  holds and restarts at the new run with one `STREAM_INTERRUPTION`, so the
+  streams re-base as for a forward jump. A lone stale or forged packet only
+  gets dropped.
+- **Interruption ERRORs are rate-limited** to one per 10 s, with a count of
+  the ones suppressed. A small backward step on every packet adds a hint: the
+  parsed sample count exceeds the RTP step, so the channel count or encoding
+  probably mismatches.
+- **MultiStream's health monitor also watches output.** A slot whose packets
+  keep arriving while nothing comes out of its resequencer for
+  `drop_timeout_sec` now gets dropped and restored.
 - **`flush()` stops before a `STREAM_INTERRUPTION`** and keeps the post-gap
   packets for the next call (`pending` tells when more remain). `stop()` in
   RadiodStream and MultiStream drains it chunk by chunk, so the post-gap

@@ -652,3 +652,180 @@ def test_m4_multistream_hands_the_callback_a_copy():
         out, gaps = slot.resequencer.process_packet(mk(seq, T0 + seq * N))
         m._route_output(slot, out, gaps)
     assert seen and all(q is not slot.quality for q in seen)
+
+
+# ── Round 2: a sequence reset re-syncs instead of locking out (C1) ──
+
+K = getattr(PacketResequencer, "RESYNC_PACKETS", 4)
+
+
+def _reset_packets(old_first, new_first, new_base, n_old=10, n_new=40,
+                   skip_old=()):
+    old = [mk(s, T0 + (s - old_first) * N)
+           for s in range(old_first, old_first + n_old) if s not in skip_old]
+    new = [mk(new_first + k, new_base + k * N) for k in range(n_new)]
+    return old, new
+
+
+@pytest.mark.parametrize("old_first", [1000, 20000, 32700])
+def test_c1_seq_reset_behind_resyncs_after_k_packets(old_first):
+    """radiod re-creates the channel from its template: seq restarts at 0,
+    RTP re-based.  next_expected sits 1..32767 ahead of the new run."""
+    old, new = _reset_packets(old_first, 0, 5_000_000)
+    run = Run(old + new, buffer_size=64, rate=RATE)
+    check(run, contiguous=False)
+    assert run.delivered == len(old + new) * N
+    ints = [g for g in run.gaps if g.source is GapSource.STREAM_INTERRUPTION]
+    assert len(ints) == 1 and run.r.stats.interruptions == 1
+    assert run.r.stats.packets_late == 0
+
+
+def test_c1_seq_reset_resyncs_without_waiting_more_than_k():
+    old, new = _reset_packets(1000, 0, 5_000_000)
+    r = PacketResequencer(buffer_size=64, samples_per_packet=N, sample_rate=RATE)
+    for p in old:
+        r.process_packet(p)
+    first_new_out = None
+    for k, p in enumerate(new):
+        s, g = r.process_packet(p)
+        if s is not None and any(int(v) - 1 >= 5_000_000 for v in s):
+            first_new_out = k
+            break
+    assert first_new_out is not None and first_new_out <= K
+
+
+def test_c1_seq_reset_ahead_still_works():
+    old, new = _reset_packets(40000, 0, 5_000_000)   # 0 reads as ahead
+    run = Run(old + new, buffer_size=64, rate=RATE)
+    check(run, contiguous=False)
+    assert run.delivered == len(old + new) * N
+
+
+def test_c1_reset_with_old_packets_pending_emits_them_first():
+    old, new = _reset_packets(1000, 0, 5_000_000, skip_old=(1005,))
+    run = Run(old + new, buffer_size=64, rate=RATE)
+    check(run, contiguous=False)
+    # the old hole is filled, the old packets after it delivered
+    assert run.delivered == (len(old) + 1 + len(new)) * N
+    assert run.r.stats.interruptions == 1
+
+
+def test_c1_single_far_back_packet_is_dropped_without_resync():
+    pk = seqs(list(range(1000, 1010))) + [mk(5, 77)] \
+        + seqs(list(range(1010, 1030)))
+    run = Run([mk(p.sequence, T0 + (p.sequence - 1000) * N)
+               if p.sequence >= 1000 else p for p in pk])
+    check(run)
+    assert run.r.stats.interruptions == 0
+    assert run.r.stats.packets_late == 1
+
+
+def test_c1_broken_candidate_run_does_not_resync():
+    far = [mk(5 + k, 77 + k * N) for k in range(K - 1)]
+    pk = ([mk(s, T0 + (s - 1000) * N) for s in range(1000, 1010)] + far
+          + [mk(s, T0 + (s - 1000) * N) for s in range(1010, 1015)] + far
+          + [mk(s, T0 + (s - 1000) * N) for s in range(1015, 1030)])
+    run = Run(pk)
+    check(run)
+    assert run.r.stats.interruptions == 0
+
+
+def test_c1_reorder_fuzz_across_wrap_never_resyncs():
+    rng = np.random.default_rng(20261122)
+    for trial in range(100):
+        start = 65535 - int(rng.integers(0, 300))
+        pk = [mk(start + k, T0 + k * N) for k in range(400)]
+        pk = [p for p in pk if rng.random() > 0.02]           # 2 % loss
+        for i in range(len(pk) - 1):                          # local reorder
+            if rng.random() < 0.2:
+                j = min(len(pk) - 1, i + int(rng.integers(1, 6)))
+                pk[i], pk[j] = pk[j], pk[i]
+        for _ in range(5):                                    # stray duplicates
+            i = int(rng.integers(5, len(pk)))
+            pk.insert(i, pk[i - int(rng.integers(1, 5))])
+        for _ in range(3):              # lone stale/forged packets far behind
+            i = int(rng.integers(5, len(pk)))
+            back = int(rng.integers(100, 32000))
+            pk.insert(i, mk(pk[i].sequence - back, int(rng.integers(0, M32))))
+        r = Run(pk, buffer_size=64, flush=True)
+        assert r.r.stats.interruptions == 0, trial
+
+
+def test_c1_radiodstream_labels_hold_through_a_seq_reset():
+    batches = []
+    rs = _radiod_stream(batches, resequence_buffer_size=64)
+    old, new = _reset_packets(1000, 0, 5_000_000)
+    for p in old + new:
+        rs._process_packet(_rtp(p.sequence, p.timestamp, p.samples))
+    rs.stop()
+    _labels_hold(batches)
+    assert sum(len(s) for s, _ in batches) == len(old + new) * N
+
+
+def test_c1_multistream_delivers_after_a_seq_reset():
+    batches = []
+    m = MultiStream(control=None)
+    slot = _slot(lambda s, q: batches.append((s.copy(), q.copy())))
+    slot.resequencer = PacketResequencer(buffer_size=64, samples_per_packet=N,
+                                         sample_rate=RATE)
+    old, new = _reset_packets(1000, 0, 5_000_000)
+    slot.first_rtp_timestamp = slot.quality.first_rtp_timestamp = old[0].timestamp
+    for p in old + new:
+        out, gaps = slot.resequencer.process_packet(p)
+        m._route_output(slot, out, gaps)
+    m._deliver(slot)
+    _labels_hold(batches)
+    assert sum(len(s) for s, _ in batches) == len(old + new) * N
+
+
+# ── Round 2 minors ──
+
+def test_interruption_error_log_is_rate_limited(caplog):
+    logging.disable(logging.NOTSET)
+    caplog.set_level(logging.ERROR, logger="ka9q.resequencer")
+    r = PacketResequencer(buffer_size=8, samples_per_packet=N, sample_rate=RATE)
+    # parsed count 2x the RTP step: every packet steps back by N
+    for k in range(50):
+        r.process_packet(RTPPacket(sequence=k, timestamp=T0 + k * N, ssrc=1,
+                                   samples=np.ones(2 * N)))
+    assert r.stats.interruptions >= 40
+    errors = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
+    assert 1 <= len(errors) <= 2
+    assert "mismatch" in errors[0].getMessage()
+
+
+def test_multistream_liveness_follows_delivered_output():
+    m = MultiStream(control=None)
+    slot = _slot(lambda s, q: None)
+    out, gaps = slot.resequencer.process_packet(mk(0, T0))
+    m._route_output(slot, out, gaps)                 # init: no output yet
+    assert slot.last_output_time == 0.0
+    out, gaps = slot.resequencer.process_packet(mk(1, T0 + N))
+    m._route_output(slot, out, gaps)
+    assert slot.last_output_time > 0.0
+
+
+def test_multistream_monitor_drops_a_slot_with_packets_but_no_output():
+    import time as _t
+    m = MultiStream(control=None, drop_timeout_sec=15.0)
+    slot = _slot(lambda s, q: None)
+    now = _t.time()
+    slot.last_packet_time = now                    # packets still arriving
+    slot.last_output_time = now - 20.0             # nothing out for 20 s
+    m._slots = {7: slot}
+    reasons = []
+    m._handle_drop = lambda ssrc, sl, reason: reasons.append(reason)
+    m._running = True
+    calls = iter([None, None])
+
+    def fake_sleep(_):
+        if next(calls, "stop") == "stop":
+            m._running = False
+    import ka9q.multi_stream as ms
+    orig = ms.time.sleep
+    ms.time.sleep = fake_sleep
+    try:
+        m._health_monitor_loop()
+    finally:
+        ms.time.sleep = orig
+    assert reasons and "no output" in reasons[0]
