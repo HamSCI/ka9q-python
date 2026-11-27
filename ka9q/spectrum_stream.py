@@ -50,6 +50,15 @@ logger = logging.getLogger(__name__)
 # (including .bin_data / .bin_byte_data / .bin_power_db) are populated.
 SpectrumCallback = Callable[[ChannelStatus], None]
 
+# radiod main-loop frames per second at the default 20 ms blocktime.
+FRAMES_PER_SEC = 50
+# Each poll refreshes this lifetime, so a client that dies without stop()
+# leaves its channel behind for ~20 s, not for good: radiod never reaps a
+# 0 Hz spectrum channel that carries no lifetime.
+DEFAULT_LIFETIME_FRAMES = 1000
+# stop() shortens the lifetime to ~1 s so radiod reaps the channel promptly.
+STOP_LIFETIME_FRAMES = 50
+
 
 class SpectrumStream:
     """Receive real-time spectrum data from radiod.
@@ -77,6 +86,7 @@ class SpectrumStream:
         overlap: Optional[float] = None,
         poll_interval_sec: float = 0.1,
         on_spectrum: Optional[SpectrumCallback] = None,
+        lifetime_frames: int = DEFAULT_LIFETIME_FRAMES,
     ):
         """
         Args:
@@ -98,7 +108,18 @@ class SpectrumStream:
                 rather than being forwarded to radiod as a raw float.
             poll_interval_sec: Seconds between spectrum poll commands.
             on_spectrum: Callback(ChannelStatus) invoked on each spectrum frame.
+            lifetime_frames: LIFETIME each poll refreshes, in radiod frames
+                (~50/s); 0 = infinite, the behaviour before 3.29.0, which
+                leaks the channel if the client dies before stop().  It
+                must outlast two poll intervals.
         """
+        if not isinstance(lifetime_frames, int) or lifetime_frames < 0:
+            raise ValueError(
+                f"lifetime_frames must be an int >= 0, got {lifetime_frames!r}")
+        if lifetime_frames and 2 * poll_interval_sec >= lifetime_frames / FRAMES_PER_SEC:
+            raise ValueError(
+                f"poll_interval_sec {poll_interval_sec} lets a {lifetime_frames}-frame "
+                f"lifetime lapse; poll at least twice per lifetime")
         self._control = control
         self._frequency_hz = frequency_hz
         self._bin_count = bin_count
@@ -110,6 +131,7 @@ class SpectrumStream:
         self._overlap = overlap
         self._poll_interval_sec = poll_interval_sec
         self._on_spectrum = on_spectrum
+        self._lifetime_frames = lifetime_frames
 
         # Allocated at start()
         self._ssrc: Optional[int] = None
@@ -155,8 +177,8 @@ class SpectrumStream:
         )
         self._recv_thread.start()
 
-        # Poll thread — periodically re-sends the spectrum command to keep
-        # the channel alive and trigger fresh FFT data
+        # Poll thread — periodically re-sends the spectrum command (with its
+        # LIFETIME) to keep the channel alive and trigger fresh FFT data
         self._poll_thread = threading.Thread(
             target=self._poll_loop,
             daemon=True,
@@ -197,6 +219,12 @@ class SpectrumStream:
                 self._control.remove_channel(self._ssrc)
             except Exception as exc:
                 logger.debug("remove_channel on stop: %s", exc)
+            if self._lifetime_frames:
+                try:
+                    self._control.set_channel_lifetime(
+                        self._ssrc, STOP_LIFETIME_FRAMES, encoding=0)
+                except Exception as exc:
+                    logger.debug("set_channel_lifetime on stop: %s", exc)
 
         logger.info(
             "SpectrumStream stopped: %d frames received, %d polls sent",
@@ -249,6 +277,7 @@ class SpectrumStream:
             overlap=self._overlap,
             demod_type=self._demod_type,
             frequency_hz=self._frequency_hz,
+            lifetime=self._lifetime_frames,
         )
         self._polls_sent += 1
 

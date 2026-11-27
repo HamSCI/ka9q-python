@@ -124,5 +124,87 @@ def test_spectrum_stream_delegates_to_set_spectrum():
         overlap=0.5,
         demod_type=DemodType.SPECT2_DEMOD,
         frequency_hz=14.1e6,
+        lifetime=1000,
     )
     assert s._polls_sent == 1
+
+
+# radiod never reaps a 0 Hz spectrum channel that carries no lifetime: a
+# client that died before stop() leaked its channel for good (chirp scout
+# step 1 on SIGMA, 2026-11-19, four leaked channels).
+
+class TestSpectrumLifetime:
+    def test_set_spectrum_sends_lifetime(self):
+        c = _bare_control()
+        sent = _capture_send(c)
+        c.set_spectrum(ssrc=12345, bin_count=512, lifetime=1000)
+        assert _has_tag(sent[0], StatusType.LIFETIME)
+
+    def test_set_spectrum_omits_lifetime_by_default(self):
+        c = _bare_control()
+        sent = _capture_send(c)
+        c.set_spectrum(ssrc=12345, bin_count=512)
+        assert not _has_tag(sent[0], StatusType.LIFETIME)
+
+    @pytest.mark.parametrize("bad", [-1, 2.5, "1000"])
+    def test_set_spectrum_rejects_bad_lifetime(self, bad):
+        c = _bare_control()
+        c.send_command = MagicMock()
+        with pytest.raises(ValidationError, match="lifetime"):
+            c.set_spectrum(ssrc=12345, lifetime=bad)
+
+    def test_every_poll_refreshes_the_lifetime(self):
+        from ka9q.spectrum_stream import SpectrumStream
+        control = MagicMock()
+        s = SpectrumStream(control=control, frequency_hz=14.1e6,
+                           lifetime_frames=500)
+        s._ssrc = 777
+        s._send_spectrum_command()
+        s._send_spectrum_command()
+        for call in control.set_spectrum.call_args_list:
+            assert call.kwargs["lifetime"] == 500
+
+    def test_zero_lifetime_keeps_the_old_behaviour(self):
+        from ka9q.spectrum_stream import SpectrumStream
+        control = MagicMock()
+        s = SpectrumStream(control=control, frequency_hz=14.1e6,
+                           lifetime_frames=0)
+        s._ssrc = 777
+        s._send_spectrum_command()
+        assert control.set_spectrum.call_args.kwargs["lifetime"] == 0
+
+    @pytest.mark.parametrize("bad", [-1, 2.5])
+    def test_bad_lifetime_frames_refused(self, bad):
+        from ka9q.spectrum_stream import SpectrumStream
+        with pytest.raises(ValueError, match="lifetime_frames"):
+            SpectrumStream(control=MagicMock(), frequency_hz=14.1e6,
+                           lifetime_frames=bad)
+
+    def test_lifetime_must_outlast_two_polls(self):
+        # 100 frames ~ 2 s at 50 frames/s; a 1.5 s poll would let it lapse.
+        from ka9q.spectrum_stream import SpectrumStream
+        with pytest.raises(ValueError, match="poll_interval_sec"):
+            SpectrumStream(control=MagicMock(), frequency_hz=14.1e6,
+                           lifetime_frames=100, poll_interval_sec=1.5)
+
+    def test_stop_removes_and_shortens_the_lifetime(self):
+        from ka9q.spectrum_stream import SpectrumStream, STOP_LIFETIME_FRAMES
+        control = MagicMock()
+        s = SpectrumStream(control=control, frequency_hz=14.1e6)
+        s._ssrc = 777
+        s._running = True
+        s.stop()
+        control.remove_channel.assert_called_once_with(777)
+        control.set_channel_lifetime.assert_called_once_with(
+            777, STOP_LIFETIME_FRAMES, encoding=0)
+
+    def test_stop_with_infinite_lifetime_sends_no_lifetime(self):
+        from ka9q.spectrum_stream import SpectrumStream
+        control = MagicMock()
+        s = SpectrumStream(control=control, frequency_hz=14.1e6,
+                           lifetime_frames=0)
+        s._ssrc = 777
+        s._running = True
+        s.stop()
+        control.remove_channel.assert_called_once_with(777)
+        control.set_channel_lifetime.assert_not_called()

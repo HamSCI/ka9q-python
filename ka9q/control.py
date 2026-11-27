@@ -3100,7 +3100,8 @@ class RadiodControl:
                      window_type: Optional[int] = None, avg: Optional[int] = None,
                      overlap: Optional[float] = None, base: Optional[float] = None,
                      step: Optional[float] = None, demod_type: Optional[int] = None,
-                     frequency_hz: Optional[float] = None):
+                     frequency_hz: Optional[float] = None,
+                     lifetime: Optional[int] = None):
         """
         Configure spectrum analyzer mode parameters.
 
@@ -3129,6 +3130,10 @@ class RadiodControl:
                  DemodType.SPECT_DEMOD or SPECT2_DEMOD) so a spectrum
                  channel can be created/retargeted with one command.
             frequency_hz: Optional center frequency to set in the same packet.
+            lifetime: Optional LIFETIME in radiod frames (~50/s), sent in the
+                 same packet; 0 = infinite.  radiod never reaps a 0 Hz
+                 spectrum channel without one, so a client that dies before
+                 removing its channel leaks it.  See set_channel_lifetime.
 
         Example:
             >>> control.set_spectrum(ssrc=12345, bin_bw_hz=100, bin_count=512,
@@ -3184,6 +3189,11 @@ class RadiodControl:
             encode_float(cmdbuffer, StatusType.SPECTRUM_BASE, base)
         if step is not None:
             encode_float(cmdbuffer, StatusType.SPECTRUM_STEP, step)
+        if lifetime is not None:
+            if not isinstance(lifetime, int) or lifetime < 0:
+                raise ValidationError(
+                    f"lifetime must be an int >= 0 (frames), got {lifetime!r}")
+            encode_int(cmdbuffer, StatusType.LIFETIME, lifetime)
 
         encode_int(cmdbuffer, StatusType.OUTPUT_SSRC, ssrc)
         encode_int(cmdbuffer, StatusType.COMMAND_TAG, secrets.randbits(31))
@@ -3193,7 +3203,7 @@ class RadiodControl:
             f"Setting spectrum for SSRC {ssrc}: bw={bin_bw_hz} Hz, "
             f"bins={bin_count}, crossover={crossover_hz} Hz, "
             f"window={window_type}, avg={avg}, overlap={overlap}, "
-            f"base={base}, step={step}"
+            f"base={base}, step={step}, lifetime={lifetime}"
         )
         self.send_command(cmdbuffer)
     

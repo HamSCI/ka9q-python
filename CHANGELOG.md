@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`SpectrumStream` no longer leaks its radiod channel when the client dies.**
+  radiod never reaps a 0 Hz spectrum channel that carries no lifetime, so a
+  client killed before `stop()` left its channel running for good. On SIGMA
+  the chirp scout's smoke test (2026-11-19) leaked four. Each poll now
+  refreshes a lifetime (`lifetime_frames`, default 1000 frames, about 20 s),
+  and `stop()` shortens it to 50 frames after removing the channel. A
+  lifetime shorter than two poll intervals raises `ValueError`.
+  `lifetime_frames=0` keeps the old, infinite lifetime.
+- **`set_spectrum()` takes `lifetime`**, sent as LIFETIME in the same packet,
+  so the spectrum channel keeps one write path.
+
 ## 3.28.0 (2026-11-22)
 
 ### Fixed
