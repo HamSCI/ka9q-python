@@ -213,18 +213,21 @@ class SpectrumStream:
                 pass
             self._sock = None
 
-        # Tell radiod to remove the channel (set freq to 0)
+        # Shorten the lifetime, then tell radiod to remove the channel (set
+        # freq to 0).  This order matters: radiod creates a channel for a
+        # command to an unknown SSRC, so a lifetime sent after the removal
+        # took effect would start a ghost channel.
         if self._ssrc is not None:
-            try:
-                self._control.remove_channel(self._ssrc)
-            except Exception as exc:
-                logger.debug("remove_channel on stop: %s", exc)
             if self._lifetime_frames:
                 try:
                     self._control.set_channel_lifetime(
                         self._ssrc, STOP_LIFETIME_FRAMES, encoding=0)
                 except Exception as exc:
                     logger.debug("set_channel_lifetime on stop: %s", exc)
+            try:
+                self._control.remove_channel(self._ssrc)
+            except Exception as exc:
+                logger.debug("remove_channel on stop: %s", exc)
 
         logger.info(
             "SpectrumStream stopped: %d frames received, %d polls sent",

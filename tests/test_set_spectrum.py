@@ -198,6 +198,19 @@ class TestSpectrumLifetime:
         control.set_channel_lifetime.assert_called_once_with(
             777, STOP_LIFETIME_FRAMES, encoding=0)
 
+    def test_stop_shortens_the_lifetime_before_removing(self):
+        # radiod creates a channel for a command to an unknown SSRC, so a
+        # lifetime sent after the channel is gone would make a ghost.
+        from ka9q.spectrum_stream import SpectrumStream
+        control = MagicMock()
+        s = SpectrumStream(control=control, frequency_hz=14.1e6)
+        s._ssrc = 777
+        s._running = True
+        s.stop()
+        names = [c[0] for c in control.method_calls
+                 if c[0] in ("set_channel_lifetime", "remove_channel")]
+        assert names == ["set_channel_lifetime", "remove_channel"]
+
     def test_stop_with_infinite_lifetime_sends_no_lifetime(self):
         from ka9q.spectrum_stream import SpectrumStream
         control = MagicMock()

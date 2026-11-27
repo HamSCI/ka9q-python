@@ -9,7 +9,9 @@
   client killed before `stop()` left its channel running for good. On SIGMA
   the chirp scout's smoke test (2026-11-19) leaked four. Each poll now
   refreshes a lifetime (`lifetime_frames`, default 1000 frames, about 20 s),
-  and `stop()` shortens it to 50 frames after removing the channel. A
+  and `stop()` shortens it to 50 frames before removing the channel
+  (radiod creates a channel for a command to an unknown SSRC, so the
+  reverse order could start a ghost). A
   lifetime shorter than two poll intervals raises `ValueError`.
   `lifetime_frames=0` keeps the old, infinite lifetime.
 - **`set_spectrum()` takes `lifetime`**, sent as LIFETIME in the same packet,
