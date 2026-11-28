@@ -42,6 +42,7 @@ Usage:
 import logging
 import socket
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -440,6 +441,27 @@ class MultiStream:
             pass
 
         sock.bind(("0.0.0.0", self._port))
+
+        # Receive only the group this socket joins.  Bound to 0.0.0.0, a
+        # socket otherwise gets (Linux default IP_MULTICAST_ALL=1) every
+        # datagram for this port whose group ANY socket on the host joined.
+        # On KFS-MAIN (2026-11-28) that was ~14 000 datagrams/s against
+        # wspr-recorder's own ~850/s; while the decode workers held the GIL
+        # at a cycle boundary the foreign traffic overflowed the 32 MB
+        # buffer.  The socket module may not export IP_MULTICAST_ALL; its
+        # Linux value is 49.
+        if sys.platform.startswith("linux"):
+            try:
+                sock.setsockopt(
+                    socket.IPPROTO_IP,
+                    getattr(socket, "IP_MULTICAST_ALL", 49), 0,
+                )
+            except OSError:
+                logger.warning(
+                    "MultiStream: could not clear IP_MULTICAST_ALL; this "
+                    "socket also receives other groups on port %d",
+                    self._port,
+                )
 
         # Join the multicast group on EVERY local IPv4 interface, not
         # via INADDR_ANY (which lets the kernel pick a single interface

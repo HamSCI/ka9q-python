@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`MultiStream` receives only its own multicast group.** Its socket binds
+  `0.0.0.0:<port>`, so with Linux's default `IP_MULTICAST_ALL=1` it also got
+  every group any other socket on the host had joined on that port. On
+  KFS-MAIN (2026-11-28) each wspr-recorder socket took ~14 000 datagrams/s
+  against its own ~850/s; when the decode workers held the GIL at a WSPR
+  cycle boundary, the foreign traffic filled the 32 MB receive buffer and
+  5 313 datagrams were dropped in two seconds. The socket now clears
+  `IP_MULTICAST_ALL`.
+
 ## 3.29.0 (2026-11-27)
 
 ### Fixed
